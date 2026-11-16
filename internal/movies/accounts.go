@@ -3,6 +3,7 @@ package movies
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/shyper/autodownloadarr/internal/mediaserver"
 	"github.com/shyper/autodownloadarr/internal/store"
@@ -33,8 +34,9 @@ type AccountLibraries struct {
 	fetch  func(context.Context, mediaserver.Server) ([]mediaserver.Item, error)
 	path   func(mediaserver.Item, string) string // item + remote file → local index path
 
-	users   map[int64]string
-	indexes map[string]*ItemIndex
+	users    map[int64]string
+	indexes  map[string]*ItemIndex
+	profiles []store.MediaProfile // assigned profiles, loaded on demand
 }
 
 // NewAccountLibraries prepares a poll. fetch lists the library of a client;
@@ -121,4 +123,94 @@ func SwitchAccount(base *store.WatchBase, key string, watched bool, it mediaserv
 		*base = store.WatchBase{}
 	}
 	base.Account = key
+}
+
+// Participants returns the users whose watch state counts for a title: its
+// active viewers in the order they joined, or the requester (0: the default
+// account) when nobody watches it any more. primary decides when the title
+// counts as watched: the requester while they watch it, else the first
+// viewer.
+func Participants(viewers []store.Viewer, requester int64) (users []int64, primary int64) {
+	for _, v := range viewers {
+		if v.Active() {
+			users = append(users, v.UserID)
+		}
+	}
+	if len(users) == 0 {
+		return []int64{requester}, requester
+	}
+	for _, u := range users {
+		if u == requester {
+			return users, requester
+		}
+	}
+	return users, users[0]
+}
+
+// Detected is a profile that started watching an item without being one of
+// its viewers.
+type Detected struct {
+	UserID  int64
+	Account string
+	Item    mediaserver.Item
+}
+
+// Detect finds assigned profiles that played an item after its file
+// appeared (since) while their user is not a viewer (known holds every
+// user with a viewer row, also those who left).
+func (a *AccountLibraries) Detect(ctx context.Context, known map[int64]bool, since time.Time,
+	lookup func(*ItemIndex) (mediaserver.Item, bool),
+) ([]Detected, error) {
+	if since.IsZero() {
+		return nil, nil // unknown when the file appeared: nothing to tell apart
+	}
+	if a.profiles == nil {
+		list, err := a.svc.Store.MediaProfiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		a.profiles = []store.MediaProfile{}
+		for _, p := range list {
+			if p.UserID > 0 {
+				a.profiles = append(a.profiles, p)
+			}
+		}
+	}
+	var out []Detected
+	for _, p := range a.profiles {
+		if known[p.UserID] {
+			continue
+		}
+		account, err := a.Account(ctx, p.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if account == "" && !p.Owner {
+			continue // the profile cannot be read: its plays are not its own
+		}
+		ix, err := a.Index(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		if ix == nil {
+			continue
+		}
+		it, ok := lookup(ix)
+		if !ok || it.LastViewedAt.Before(since.Truncate(time.Second)) {
+			continue
+		}
+		out = append(out, Detected{UserID: p.UserID, Account: account, Item: it})
+	}
+	return out, nil
+}
+
+// PrepareBase gets a viewer's baseline ready for an observation with the
+// account key: a viewer who had seen the item before a new file appeared
+// stays at "seen", and a changed account takes a new baseline.
+func PrepareBase(p *store.Progress, account string, it mediaserver.Item) {
+	if !p.Base.Set && p.WatchedAt != nil {
+		p.Base = store.WatchBase{Set: true, Views: it.ViewCount - 1, Offset: it.ViewOffset.Milliseconds(), Account: account}
+		return
+	}
+	SwitchAccount(&p.Base, account, p.WatchedAt != nil, it)
 }

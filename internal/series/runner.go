@@ -167,22 +167,26 @@ func (m *Manager) fetchRelease(ctx context.Context, g store.General, se store.Se
 	} else if err != nil {
 		return fetch.Result{}, fetch.KindDownloadError, err
 	}
-	ic, err := m.svc.Indexer(ctx, rel.IndexerID)
-	if err != nil {
-		return fetch.Result{}, kindNZBUnavailable, err
-	}
-	data, nzbName, err := ic.Client.FetchNZB(ctx, rel.NZBURL)
-	switch {
-	case ctx.Err() != nil:
-		return fetch.Result{}, fetch.KindCancelled, context.Cause(ctx)
-	case errors.Is(err, httpx.ErrRateLimited), errors.Is(err, httpx.ErrUnavailable), errors.Is(err, httpx.ErrUnauthorized):
-		return fetch.Result{}, CodeIndexerError, err
-	case err != nil:
-		return fetch.Result{}, kindNZBUnavailable, err
-	}
-	if g.SaveNZBs {
-		if err := m.svc.SaveNZB(rel, nzbName, data); err != nil {
-			return fetch.Result{}, fetch.KindDiskError, err
+	// An archived NZB of the same release saves asking the indexer again.
+	data, nzbName, archived := m.svc.LoadNZB(rel)
+	if !archived {
+		ic, err := m.svc.Indexer(ctx, rel.IndexerID)
+		if err != nil {
+			return fetch.Result{}, kindNZBUnavailable, err
+		}
+		data, nzbName, err = ic.Client.FetchNZB(ctx, rel.NZBURL)
+		switch {
+		case ctx.Err() != nil:
+			return fetch.Result{}, fetch.KindCancelled, context.Cause(ctx)
+		case errors.Is(err, httpx.ErrRateLimited), errors.Is(err, httpx.ErrUnavailable), errors.Is(err, httpx.ErrUnauthorized):
+			return fetch.Result{}, CodeIndexerError, err
+		case err != nil:
+			return fetch.Result{}, kindNZBUnavailable, err
+		}
+		if g.SaveNZBs {
+			if err := m.svc.SaveNZB(rel, nzbName, data); err != nil {
+				return fetch.Result{}, fetch.KindDiskError, err
+			}
 		}
 	}
 	list, err := m.store.ArchivePasswords(ctx)
@@ -296,7 +300,11 @@ func (m *Manager) finishPack(ctx, dctx context.Context, se store.Series, e store
 		ep.State, ep.File, ep.AvailableAt, ep.Attempts, ep.LastError = store.MovieAvailable, final, &now, 0, ""
 		ep.ReleaseKey, ep.ReleaseTitle, ep.ReleaseFingerprint = rel.Identity(), rel.Title, rel.Fingerprint
 		ep.Progress, ep.StartedAt, ep.WatchedAt, ep.DeleteAt, ep.Base = 0, nil, nil, nil, store.WatchBase{}
+		ep.DeleteReason = ""
 		if err := m.store.UpdateEpisode(ctx, *ep); err != nil {
+			return err
+		}
+		if err := m.store.ResetProgressBase(ctx, store.ItemEpisode, ep.ID); err != nil {
 			return err
 		}
 		m.log.Info("episode available from season pack", "series", se.Title, "season", ep.Season, "episode", ep.Episode, "file", final)
@@ -382,8 +390,13 @@ func (m *Manager) finish(ctx, dctx context.Context, se store.Series, e store.Epi
 		e.State, e.File, e.AvailableAt, e.Attempts, e.LastError = store.MovieAvailable, path, &now, 0, ""
 		// A new file: earlier viewing does not count, the next poll takes
 		// the baseline.
+		// Viewers who had seen it keep it as seen (see PrepareBase).
 		e.Progress, e.StartedAt, e.WatchedAt, e.DeleteAt, e.Base = 0, nil, nil, nil, store.WatchBase{}
+		e.DeleteReason = ""
 		if err := m.store.UpdateEpisode(ctx, e); err != nil {
+			return err
+		}
+		if err := m.store.ResetProgressBase(ctx, store.ItemEpisode, e.ID); err != nil {
 			return err
 		}
 		m.log.Info("episode available", "series", se.Title, "file", path)

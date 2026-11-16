@@ -36,6 +36,9 @@ AutoDownloadarr handles everything you only want to see once.
   a fallback and only the needed episodes are kept
 - Several users: administrators manage accounts, everyone requests movies and
   series, and optional per-user limits cap active requests and stored gigabytes
+- Media profiles and shared viewers: Plex Home profiles or Jellyfin/Emby users
+  are assigned to users, so each user's watch state and watchlist are their
+  own; several users can watch the same title at their own pace
 - Optional full availability check before downloading (every article, `STAT`
   with pipelining), so a download does not fail halfway
 - Only new viewing counts: Plex remembers titles watched long ago, that history
@@ -216,9 +219,10 @@ minute to seven days, with a 30-minute default. **Sync now** queues an import wi
 waiting for that interval. The page shows whether work is queued/running and the
 last attempt's requested, skipped and failed counts. Automatic imports can be paused.
 
-Only movie and show entries with a TMDB ID are imported. Existing requests are
-skipped without changing their owner, restoring expired files or changing their
-settings. New requests belong to the connected AutoDownloadarr user, respect that
+Only movie and show entries with a TMDB ID are imported. For existing requests
+the user joins as a viewer (see below) without changing the owner, restoring
+expired files or changing their settings; a user who left a title is not added
+again. New requests belong to the connected AutoDownloadarr user, respect that
 user's quotas and use the existing default quality profile and series settings.
 Duplicate entries across sources are imported once. Manual movie and series
 removals are remembered across restarts and suppress subsequent automatic imports;
@@ -232,6 +236,31 @@ the scheduler with rate-limit backoff. Changing the application's Client ID requ
 users to reconnect. Disconnecting cancels queued work, deletes local credentials
 and attempts to revoke the Trakt authorization. Deleting a user also removes their
 connection. Trakt's own account/app access limits still apply.
+
+### Media profiles and shared viewers
+
+Under **Settings → Media server → Profiles** an administrator reads the Plex Home
+profiles (or the Jellyfin/Emby users) and assigns each to one AutoDownloadarr user.
+A PIN-protected Plex profile asks for its PIN once; it is not stored. A user's
+requests then use their own profile's watch state, and the Plex watchlist of a
+profile can be imported for its user. Users without a profile use the server
+owner's account.
+
+Every title has **viewers**: its requester, users who request it again, whose
+watchlist or Trakt list contains it, who join on the detail page with **Watch
+too**, and assigned profiles that simply start playing it. Viewers can leave;
+administrators can remove them. The quota counts only for the requester, and
+only the owner and administrators manage a title.
+
+- **Movies** count as watched when the requester has seen them. Viewers who
+  started but have not finished keep the movie until they do, at most for the
+  started-movie retention.
+- **Series** give each viewer a window of their own. An episode is removed once
+  every viewer is done with it (or it lies outside their window), so a faster
+  viewer can leave a gap; it is fetched again when the slower viewer gets
+  there, from the same release and its archived NZB when available. Episodes
+  removed outside AutoDownloadarr are not fetched again.
+- **Notifications** from the Telegram and Discord bots reach every viewer.
 
 ### Notifications
 

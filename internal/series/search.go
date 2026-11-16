@@ -48,13 +48,28 @@ func (m *Manager) handleSearch(ctx context.Context, t scheduler.Task) error {
 	}
 	if !e.Aired(m.now()) && e.AirDate != "" {
 		// Moved broadcast date: wait again.
-		return m.want(ctx, &e, m.now())
+		return m.want(ctx, &e, m.now(), false)
 	}
 	e.State, e.NextSearchAt = store.MovieSearching, nil
 	if err := m.store.UpdateEpisode(ctx, e); err != nil {
 		return err
 	}
 	m.publishEpisode(e)
+
+	if p.Reuse {
+		rel, ok, err := m.store.PreviousRelease(ctx, store.ForEpisode(e.ID), e.ReleaseKey)
+		if err != nil {
+			return err
+		}
+		if ok {
+			m.mu.Lock()
+			m.forced[e.ID] = rel.ID
+			m.mu.Unlock()
+			m.log.Info("fetching episode again from its previous release", "series", se.Title, "season", e.Season,
+				"episode", e.Episode, "release", rel.Title)
+			return m.pickNext(ctx, e, p.Round)
+		}
+	}
 
 	rels, err := m.search(ctx, se, e)
 	switch {

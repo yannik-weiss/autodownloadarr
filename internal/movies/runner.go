@@ -109,22 +109,26 @@ func (m *Manager) download(ctx context.Context, mv store.Movie, rel store.Releas
 		return outcome{kind: CodeDownloadError, err: err}
 	}
 
-	ic, err := m.svc.Indexer(ctx, rel.IndexerID)
-	if err != nil {
-		return outcome{kind: kindNZBUnavailable, err: err}
-	}
-	data, nzbName, err := ic.Client.FetchNZB(ctx, rel.NZBURL)
-	switch {
-	case ctx.Err() != nil:
-		return outcome{kind: kindCancelled, err: context.Cause(ctx)}
-	case errors.Is(err, httpx.ErrRateLimited), errors.Is(err, httpx.ErrUnavailable), errors.Is(err, httpx.ErrUnauthorized):
-		return outcome{kind: CodeIndexerError, err: err}
-	case err != nil:
-		return outcome{kind: kindNZBUnavailable, err: err}
-	}
-	if g.SaveNZBs {
-		if err := m.svc.SaveNZB(rel, nzbName, data); err != nil {
-			return outcome{kind: CodeDiskError, err: err}
+	// An archived NZB of the same release saves asking the indexer again.
+	data, nzbName, archived := m.svc.LoadNZB(rel)
+	if !archived {
+		ic, err := m.svc.Indexer(ctx, rel.IndexerID)
+		if err != nil {
+			return outcome{kind: kindNZBUnavailable, err: err}
+		}
+		data, nzbName, err = ic.Client.FetchNZB(ctx, rel.NZBURL)
+		switch {
+		case ctx.Err() != nil:
+			return outcome{kind: kindCancelled, err: context.Cause(ctx)}
+		case errors.Is(err, httpx.ErrRateLimited), errors.Is(err, httpx.ErrUnavailable), errors.Is(err, httpx.ErrUnauthorized):
+			return outcome{kind: CodeIndexerError, err: err}
+		case err != nil:
+			return outcome{kind: kindNZBUnavailable, err: err}
+		}
+		if g.SaveNZBs {
+			if err := m.svc.SaveNZB(rel, nzbName, data); err != nil {
+				return outcome{kind: CodeDiskError, err: err}
+			}
 		}
 	}
 	list, err := m.store.ArchivePasswords(ctx)

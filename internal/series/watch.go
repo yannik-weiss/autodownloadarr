@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shyper/autodownloadarr/internal/fetch"
 	"github.com/shyper/autodownloadarr/internal/mediaserver"
@@ -41,7 +42,8 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 	if _, err := libs.Index(ctx, ""); err != nil {
 		return err
 	}
-	requester := map[int64]int64{} // series ID → requesting user
+	series := map[int64]store.Series{}
+	viewers := map[int64][]store.Viewer{}
 
 	g, err := m.store.General(ctx)
 	if err != nil {
@@ -64,7 +66,7 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 					return err
 				}
 			}
-			e.State, e.File, e.MediaKey, e.DeleteAt = store.MovieDeleted, "", "", nil
+			e.State, e.File, e.MediaKey, e.DeleteAt, e.DeleteReason = store.MovieDeleted, "", "", nil, store.DeleteMissing
 			if err := m.store.UpdateEpisode(ctx, e); err != nil {
 				return err
 			}
@@ -72,45 +74,19 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 			changedSeries[e.SeriesID] = true
 			continue
 		}
-		userID, ok := requester[e.SeriesID]
+		se, ok := series[e.SeriesID]
 		if !ok {
-			se, err := m.store.Series(ctx, e.SeriesID)
-			if err != nil {
+			if se, err = m.store.Series(ctx, e.SeriesID); err != nil {
 				return err
 			}
-			userID, requester[e.SeriesID] = se.RequestedBy, se.RequestedBy
+			series[e.SeriesID] = se
+			if viewers[e.SeriesID], err = m.store.Viewers(ctx, store.ViewerSeries, e.SeriesID); err != nil {
+				return err
+			}
 		}
-		account, err := libs.Account(ctx, userID)
+		changed, err := m.observeEpisode(ctx, libs, se, viewers[e.SeriesID], &e, now)
 		if err != nil {
 			return err
-		}
-		ix, err := libs.Index(ctx, account)
-		if err != nil {
-			return err
-		}
-		if ix == nil {
-			continue // the profile cannot be read right now
-		}
-		it, ok := ix.Lookup(filepath.Clean(e.File), e.MediaKey)
-		if !ok {
-			continue // not scanned yet
-		}
-		base := e.Base
-		movies.SwitchAccount(&e.Base, account, e.State == store.MovieWatched, it)
-		watched, progress := movies.Observe(&e.Base, it, movies.FileSince(ctx, m.store, store.ForEpisode(e.ID), e.Base))
-		changed := e.MediaKey != it.Key || e.Base != base
-		e.MediaKey = it.Key
-		if progress != e.Progress {
-			e.Progress, changed = progress, true
-		}
-		if e.Progress > 0 && e.StartedAt == nil {
-			e.StartedAt, changed = &now, true
-		}
-		switch {
-		case watched && e.WatchedAt == nil:
-			e.WatchedAt, e.State, changed = &now, store.MovieWatched, true
-		case !watched && e.State == store.MovieWatched:
-			e.WatchedAt, e.State, e.DeleteAt, changed = nil, store.MovieAvailable, nil, true
 		}
 		if !changed {
 			continue
@@ -127,6 +103,154 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// observeEpisode updates the watch state of every viewer of an episode and
+// the episode's summary of it: the furthest progress, the first start and
+// the first viewing. Profiles that played it without being viewers of the
+// series join as viewers.
+func (m *Manager) observeEpisode(ctx context.Context, libs *movies.AccountLibraries, se store.Series, viewers []store.Viewer,
+	e *store.Episode, now time.Time,
+) (bool, error) {
+	rows, err := m.store.ItemProgress(ctx, store.ItemEpisode, e.ID)
+	if err != nil {
+		return false, err
+	}
+	progress := rows[e.ID]
+	if progress == nil {
+		progress = map[int64]store.Progress{}
+	}
+	users, primary := movies.Participants(viewers, se.RequestedBy)
+	owner := store.ForEpisode(e.ID)
+	lookup := func(ix *movies.ItemIndex) (mediaserver.Item, bool) {
+		return ix.Lookup(filepath.Clean(e.File), e.MediaKey)
+	}
+	mediaKey := e.MediaKey
+	viewerChanged := false // a viewer moved on: their window may change
+	for _, u := range users {
+		account, err := libs.Account(ctx, u)
+		if err != nil {
+			return false, err
+		}
+		ix, err := libs.Index(ctx, account)
+		if err != nil {
+			return false, err
+		}
+		if ix == nil {
+			continue // the profile cannot be read right now; its last state counts
+		}
+		it, ok := lookup(ix)
+		if !ok {
+			continue // not scanned yet
+		}
+		mediaKey = it.Key
+		p, had := progress[u]
+		if !had {
+			p = store.Progress{ItemKind: store.ItemEpisode, ItemID: e.ID, UserID: u}
+			if u == primary {
+				// State from before viewers existed.
+				p.Base, p.Progress, p.StartedAt, p.WatchedAt = e.Base, e.Progress, e.StartedAt, e.WatchedAt
+			}
+		}
+		prev := p
+		movies.PrepareBase(&p, account, it)
+		watched, pr := movies.Observe(&p.Base, it, movies.FileSince(ctx, m.store, owner, p.Base))
+		observeProgress(&p, watched, pr, now)
+		if !had || prev != p {
+			if err := m.store.SaveProgress(ctx, p); err != nil {
+				return false, err
+			}
+			viewerChanged = viewerChanged || prev.Progress != p.Progress || !sameTime(prev.WatchedAt, p.WatchedAt)
+		}
+		progress[u] = p
+	}
+
+	known := map[int64]bool{}
+	for _, v := range viewers {
+		known[v.UserID] = true
+	}
+	since := movies.FileSince(ctx, m.store, owner, store.WatchBase{})
+	detected, err := libs.Detect(ctx, known, since, lookup)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range detected {
+		active, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerSeries, TitleID: se.ID, UserID: d.UserID,
+			Source: store.SourceAuto, StartSeason: e.Season, StartEpisode: e.Episode}, false)
+		if err != nil {
+			return false, err
+		}
+		if !active {
+			continue
+		}
+		p := store.Progress{ItemKind: store.ItemEpisode, ItemID: e.ID, UserID: d.UserID}
+		watched, pr := movies.Observe(&p.Base, d.Item, since)
+		p.Base.Account = d.Account
+		observeProgress(&p, watched, pr, now)
+		if err := m.store.SaveProgress(ctx, p); err != nil {
+			return false, err
+		}
+		progress[d.UserID] = p
+		viewerChanged = true
+		m.log.Info("viewer joined by watching", "series", se.Title, "season", e.Season, "episode", e.Episode, "user", d.UserID)
+	}
+
+	// The episode's own fields summarise its viewers.
+	before := *e
+	e.MediaKey, e.Progress, e.StartedAt, e.WatchedAt = mediaKey, 0, nil, nil
+	for _, u := range append(users, detectedUsers(detected)...) {
+		p, ok := progress[u]
+		if !ok {
+			continue
+		}
+		e.Progress = max(e.Progress, p.Progress)
+		e.StartedAt = earlier(e.StartedAt, p.StartedAt)
+		e.WatchedAt = earlier(e.WatchedAt, p.WatchedAt)
+	}
+	switch {
+	case e.WatchedAt != nil:
+		e.State = store.MovieWatched
+	case e.State == store.MovieWatched:
+		e.State, e.DeleteAt = store.MovieAvailable, nil
+	}
+	return viewerChanged || before.MediaKey != e.MediaKey || before.Progress != e.Progress || before.State != e.State ||
+		!sameTime(before.StartedAt, e.StartedAt) || !sameTime(before.WatchedAt, e.WatchedAt), nil
+}
+
+// observeProgress applies an observation to a viewer's progress.
+func observeProgress(p *store.Progress, watched bool, progress float64, now time.Time) {
+	p.Progress = progress
+	if progress > 0 && p.StartedAt == nil {
+		p.StartedAt = &now
+	}
+	switch {
+	case watched && p.WatchedAt == nil:
+		p.WatchedAt = &now
+	case !watched && p.WatchedAt != nil:
+		p.WatchedAt = nil // marked unwatched again
+	}
+}
+
+func detectedUsers(d []movies.Detected) []int64 {
+	out := make([]int64, 0, len(d))
+	for _, x := range d {
+		out = append(out, x.UserID)
+	}
+	return out
+}
+
+func earlier(a, b *time.Time) *time.Time {
+	if a == nil || (b != nil && b.Before(*a)) {
+		return b
+	}
+	return a
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 // scan asks the media server to look at a folder of the TV library.

@@ -44,6 +44,20 @@ func (m *Manager) handleSearch(ctx context.Context, t scheduler.Task) error {
 	}
 	m.publish(mv)
 
+	if p.Reuse {
+		rel, ok, err := m.store.PreviousRelease(ctx, store.ForMovie(mv.ID), mv.ReleaseKey)
+		if err != nil {
+			return err
+		}
+		if ok {
+			m.mu.Lock()
+			m.forced[mv.ID] = rel.ID
+			m.mu.Unlock()
+			m.log.Info("fetching movie again from its previous release", "movie", mv.Title, "release", rel.Title)
+			return m.pickNext(ctx, mv, p.Round)
+		}
+	}
+
 	rels, err := m.search(ctx, mv)
 	switch {
 	case errors.Is(err, ErrNotConfigured):

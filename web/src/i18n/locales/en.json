@@ -796,5 +796,28 @@
     "syncing": "Synchronization is queued or running…",
     "saveFirst": "Save your changes before synchronizing manually.",
     "syncNow": "Sync now"
+  },
+  "viewers": {
+    "title": "Viewers",
+    "descriptionMovie": "Everyone who watches this movie. It is kept until the viewers who started it have finished.",
+    "descriptionSeries": "Everyone who watches this series. Each viewer has their own window of episodes; episodes are removed once all viewers are done with them and fetched again for viewers who have not seen them.",
+    "join": "Watch too",
+    "leave": "Stop watching",
+    "remove": "Remove",
+    "none": "Nobody watches this right now.",
+    "unknownUser": "Unknown user",
+    "held": "Kept until {{date}} for viewers who are still watching.",
+    "holding": "Still watching",
+    "watched": "Watched",
+    "notStarted": "Not started",
+    "progress": "{{percent}} % watched",
+    "position": "At {{code}} · {{count}} episodes ready or on the way",
+    "done": "Done",
+    "sources": {
+      "request": "Request",
+      "watchlist": "Watchlist",
+      "trakt": "Trakt",
+      "auto": "Started watching"
+    }
   }
 }

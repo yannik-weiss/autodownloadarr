@@ -62,3 +62,42 @@ func (s *Services) SaveNZB(rel store.Release, name string, data []byte) error {
 	}
 	return nil
 }
+
+// archivePrefix is the start of the archive file names of a release.
+func archivePrefix(identity string) string {
+	digest := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%x-", digest[:8])
+}
+
+// archived lists the archive files of a release.
+func (s *Services) archived(identity string) []string {
+	if s.NZBDir == "" || identity == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.NZBDir)
+	if err != nil {
+		return nil
+	}
+	prefix := archivePrefix(identity)
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) && strings.EqualFold(filepath.Ext(e.Name()), ".nzb") {
+			out = append(out, filepath.Join(s.NZBDir, e.Name()))
+		}
+	}
+	return out
+}
+
+// LoadNZB returns the archived NZB of a release, if one was saved, so the
+// same release can be fetched again without asking the indexer.
+func (s *Services) LoadNZB(rel store.Release) (data []byte, name string, ok bool) {
+	for _, path := range s.archived(rel.Identity()) {
+		data, err := os.ReadFile(path) // #nosec G304 -- inside the archive directory
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		name = strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), archivePrefix(rel.Identity())), filepath.Ext(path))
+		return data, name, true
+	}
+	return nil, "", false
+}

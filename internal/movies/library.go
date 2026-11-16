@@ -36,7 +36,11 @@ func (m *Manager) available(ctx context.Context, mv store.Movie, rel store.Relea
 	mv.Attempts, mv.LastError, mv.NextSearchAt = 0, "", nil
 	mv.StartedAt, mv.WatchedAt, mv.DeleteAt, mv.DeleteNotBefore = nil, nil, nil, nil
 	mv.Progress, mv.Base = 0, store.WatchBase{} // a new file: the next poll takes the baseline
+	mv.HoldUntil, mv.DeleteReason = nil, ""
 	if err := m.store.UpdateMovie(ctx, mv); err != nil {
+		return err
+	}
+	if err := m.store.ResetProgressBase(ctx, store.ItemMovie, mv.ID); err != nil {
 		return err
 	}
 	m.log.Info("movie available", "movie", mv.Title, "file", video)
@@ -126,7 +130,7 @@ func (m *Manager) handleDelete(ctx context.Context, t scheduler.Task) error {
 	if err := m.removeFiles(ctx, &mv); err != nil {
 		return err
 	}
-	mv.State, mv.DeleteAt = store.MovieDeleted, nil
+	mv.State, mv.DeleteAt, mv.DeleteReason = store.MovieDeleted, nil, p.Reason
 	if p.Reason != "watched" {
 		mv.State = store.MovieExpired // nobody watched it to the end
 	}
@@ -237,7 +241,7 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 					return err
 				}
 			}
-			mv.State, mv.DeleteAt, mv.Folder, mv.MediaKey = store.MovieDeleted, nil, "", ""
+			mv.State, mv.DeleteAt, mv.Folder, mv.MediaKey, mv.DeleteReason = store.MovieDeleted, nil, "", "", store.DeleteMissing
 			if err := m.store.UpdateMovie(ctx, mv); err != nil {
 				return err
 			}
@@ -247,44 +251,178 @@ func (m *Manager) PollWatched(ctx context.Context) error {
 			m.publish(mv)
 			continue
 		}
-		account, err := libs.Account(ctx, mv.RequestedBy)
+		changed, err := m.observeViewers(ctx, libs, target, g, &mv)
 		if err != nil {
 			return err
 		}
-		ix, err := libs.Index(ctx, account)
-		if err != nil {
-			return err
-		}
-		if ix == nil {
-			continue // the profile cannot be read right now
-		}
-		it, ok := ix.Lookup(filepath.Clean(mv.Folder), mv.MediaKey)
-		if !ok {
-			continue // not scanned yet
-		}
-		switched := mv.Base.Account != account
-		SwitchAccount(&mv.Base, account, mv.State == store.MovieWatched, it)
-		previousWatchedAt := mv.WatchedAt
-		changed := observeMovie(&mv, it, m.fileSince(ctx, store.ForMovie(mv.ID), mv.Base), m.now()) || switched
-		if mv.WatchedAt != nil && mv.WatchedAt != previousWatchedAt {
-			at, _ := movieDeletion(mv, g)
-			m.log.Info("movie watched", "movie", mv.Title, "delete_at", at)
-		}
-		if !changed {
-			if err := m.scheduleDeletion(ctx, mv); err != nil {
+		if changed {
+			if err := m.store.UpdateMovie(ctx, mv); err != nil {
 				return err
 			}
-			continue
+			m.publish(mv)
 		}
-		if err := m.store.UpdateMovie(ctx, mv); err != nil {
-			return err
-		}
-		m.publish(mv)
 		if err := m.scheduleDeletion(ctx, mv); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// observeViewers updates the watch state of every viewer of a movie. The
+// primary viewer (see Participants) decides whether the movie counts as
+// watched; other viewers who are still watching hold back its deletion.
+// Profiles that played the movie without being viewers join as viewers.
+func (m *Manager) observeViewers(ctx context.Context, libs *AccountLibraries, target *Target, g store.General, mv *store.Movie) (bool, error) {
+	viewers, err := m.store.Viewers(ctx, store.ViewerMovie, mv.ID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := m.store.ItemProgress(ctx, store.ItemMovie, mv.ID)
+	if err != nil {
+		return false, err
+	}
+	users, primary := Participants(viewers, mv.RequestedBy)
+	owner := store.ForMovie(mv.ID)
+	lookup := func(ix *ItemIndex) (mediaserver.Item, bool) { return ix.Lookup(filepath.Clean(mv.Folder), mv.MediaKey) }
+	now := m.now()
+	before := *mv
+	changed := false
+	var hold *time.Time
+	incomplete := false
+	extend := func(started *time.Time) {
+		until := holdUntil(*started, g, now)
+		if hold == nil || until.After(*hold) {
+			hold = &until
+		}
+	}
+	for _, u := range users {
+		account, err := libs.Account(ctx, u)
+		if err != nil {
+			return false, err
+		}
+		ix, err := libs.Index(ctx, account)
+		if err != nil {
+			return false, err
+		}
+		if ix == nil {
+			incomplete = true // the profile cannot be read right now
+			continue
+		}
+		it, ok := lookup(ix)
+		if !ok {
+			continue // not scanned yet
+		}
+		p, had := rows[mv.ID][u]
+		if !had {
+			p = store.Progress{ItemKind: store.ItemMovie, ItemID: mv.ID, UserID: u}
+			if u == primary {
+				p.Base = mv.Base // state from before viewers existed
+			}
+		}
+		if u == primary {
+			// The movie itself carries the primary viewer's state.
+			p.Progress, p.StartedAt, p.WatchedAt = mv.Progress, mv.StartedAt, mv.WatchedAt
+			if mv.State != store.MovieWatched {
+				p.WatchedAt = nil
+			}
+		}
+		prev := p
+		PrepareBase(&p, account, it)
+		cur := *mv
+		cur.Base, cur.Progress, cur.StartedAt, cur.WatchedAt = p.Base, p.Progress, p.StartedAt, p.WatchedAt
+		if u != primary {
+			cur.State = store.MovieAvailable
+			if p.WatchedAt != nil {
+				cur.State = store.MovieWatched
+			}
+		}
+		observeMovie(&cur, it, m.fileSince(ctx, owner, cur.Base), now)
+		p.Base, p.Progress, p.StartedAt, p.WatchedAt = cur.Base, cur.Progress, cur.StartedAt, nil
+		if cur.State == store.MovieWatched {
+			p.WatchedAt = cur.WatchedAt
+		}
+		if !had || prev != p {
+			if err := m.store.SaveProgress(ctx, p); err != nil {
+				return false, err
+			}
+		}
+		if u == primary {
+			if cur.WatchedAt != nil && mv.WatchedAt == nil {
+				at, _ := movieDeletion(cur, g)
+				m.log.Info("movie watched", "movie", mv.Title, "delete_at", at)
+			}
+			mv.State, mv.WatchedAt, mv.StartedAt, mv.Progress = cur.State, cur.WatchedAt, cur.StartedAt, cur.Progress
+			mv.Base, mv.MediaKey, mv.DeleteNotBefore = cur.Base, cur.MediaKey, cur.DeleteNotBefore
+			changed = movieObserved(before, *mv)
+		} else if p.StartedAt != nil && p.WatchedAt == nil {
+			extend(p.StartedAt)
+		}
+	}
+
+	known := map[int64]bool{}
+	for _, v := range viewers {
+		known[v.UserID] = true
+	}
+	since := m.fileSince(ctx, owner, store.WatchBase{})
+	detected, err := libs.Detect(ctx, known, since, lookup)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range detected {
+		active, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerMovie, TitleID: mv.ID, UserID: d.UserID, Source: store.SourceAuto}, false)
+		if err != nil || !active {
+			return false, err
+		}
+		p := store.Progress{ItemKind: store.ItemMovie, ItemID: mv.ID, UserID: d.UserID, StartedAt: &now}
+		watched, progress := Observe(&p.Base, d.Item, since)
+		p.Base.Account, p.Progress = d.Account, progress
+		if watched {
+			p.WatchedAt = &now
+		} else {
+			extend(p.StartedAt)
+		}
+		if err := m.store.SaveProgress(ctx, p); err != nil {
+			return false, err
+		}
+		m.log.Info("viewer joined by watching", "movie", mv.Title, "user", d.UserID)
+	}
+
+	if incomplete && mv.HoldUntil != nil && (hold == nil || mv.HoldUntil.After(*hold)) {
+		hold = mv.HoldUntil // keep what is known until the profile can be read again
+	}
+	if !sameTime(hold, mv.HoldUntil) {
+		mv.HoldUntil, changed = hold, true
+	}
+	return changed, nil
+}
+
+// holdUntil is how long a viewer who started at started keeps a movie: the
+// expiry for started movies, else the one for unwatched movies, else one
+// more day each time it is checked.
+func holdUntil(started time.Time, g store.General, now time.Time) time.Time {
+	switch {
+	case g.StartedExpiryDays > 0:
+		return started.Add(time.Duration(g.StartedExpiryDays) * 24 * time.Hour)
+	case g.UnwatchedExpiryDays > 0:
+		return started.Add(time.Duration(g.UnwatchedExpiryDays) * 24 * time.Hour)
+	}
+	return now.Add(24 * time.Hour)
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+// movieObserved reports whether an observation changed what is stored.
+func movieObserved(before, after store.Movie) bool {
+	return before.MediaKey != after.MediaKey || before.Base != after.Base || before.State != after.State ||
+		!sameTime(before.StartedAt, after.StartedAt) || !sameTime(before.WatchedAt, after.WatchedAt) ||
+		!sameTime(before.DeleteNotBefore, after.DeleteNotBefore) ||
+		math.Abs(before.Progress-after.Progress) >= 0.01 ||
+		(before.Progress != after.Progress && (after.Progress == 0 || after.Progress == 1))
 }
 
 // observeMovie tracks individual viewing cycles. For watched movies Base.Offset

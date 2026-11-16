@@ -104,9 +104,9 @@ func (m *Manager) Expire(ctx context.Context, id int64) error {
 		e := &eps[i]
 		switch e.State {
 		case store.MovieAvailable:
-			e.State = store.MovieExpired
+			e.State, e.DeleteReason = store.MovieExpired, store.DeleteExpired
 		case store.MovieWatched:
-			e.State = store.MovieDeleted
+			e.State, e.DeleteReason = store.MovieDeleted, store.DeleteWatched
 		case store.MovieSearching, store.MovieWaiting, store.MovieQueued, store.MovieDownloading, store.MovieFailed:
 			e.State = store.EpisodePending
 		default:

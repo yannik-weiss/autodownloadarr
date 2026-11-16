@@ -242,8 +242,10 @@ Special cases: user skips ahead (do all skipped episodes count as consumed? → 
 | Jellyfin | WebSocket/sessions API | Polling `UserData.Played`; webhook plugin optional |
 | Emby | like Jellyfin (shared base implementation) | – |
 
-Configurable: **which media server users count** (one, several = "all must have watched" or "one is enough").
-The default is the single-person case (owner of the Plex server, detected automatically during setup); multi-user is part of the data model from the start because the project will be open source.
+Media server profiles (Plex Home profiles, Jellyfin/Emby users) are assigned to users; each title has **viewers** whose watch state is read from their own profile.
+A movie counts as watched when its requester has seen it; viewers who are still watching hold the deletion back (at most until the started-movie retention).
+A series keeps one window per viewer; an episode goes when every viewer is done with it, and gaps between fast and slow viewers are fetched again (same release and archived NZB first).
+Without assigned profiles everything uses the server owner's account, the single-person case.
 Watched threshold: media server state or our own value (e.g. ≥ 90 % progress).
 
 ---
@@ -648,6 +650,7 @@ On first start (no account yet) the web interface guides through the complete se
 | Setup | Setup wizard on first start: account → Plex → indexer → Usenet → defaults; steps test before saving, skippable, can be reopened later |
 | License | GPL-3.0 |
 | Configuration | Environment variables with the prefix `AUTODOWNLOADARR_` only for startup (port, config folder, logging, proxy); everything else in the UI |
+| Shared viewers | Profiles are assigned by an administrator (one per user). Viewers join by requesting, via watchlist/Trakt, explicitly, or automatically when an assigned profile starts playing; they can leave. The quota stays with the requester. `delete_reason` separates automatic deletions (fetched again for a slower viewer) from removals outside AutoDownloadarr. Archived NZBs are only read back, never cleaned up with the title. |
 | Implementation phase 4 | Playback progress by polling the Plex series library every minute instead of WebSocket – sufficient for the triggers (deletion/refetch with at most one minute of delay). Season packs are the fallback source: a single episode is searched first, the whole season only without a usable hit; from the pack only the episodes of the window are kept, the rest is discarded. Specials (season 0) only when explicitly selected. Movies and series each have their own download slots ("parallel downloads" applies per area) but share the bandwidth limit. |
 | Implementation phase 3 | Checking the finished file via `ffprobe` (runtime, audio track language) deferred: `ffmpeg` would grow the image by ~100 MB – later as an optional image or external tool. Learned passwords per release group also later; the password list counts hits and sorts by them. |
 | Implementation phase 2 | Watched state by polling the Plex library (default every 2 min) instead of WebSocket – the WebSocket comes with series (phase 4), where the playback position matters. Manual password entry as "add password to the list + download release again". One Plex server, one movie library. |

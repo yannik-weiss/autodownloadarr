@@ -139,7 +139,8 @@ func (s *server) handleRequestSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _, _ := currentUser(r.Context())
-	if existing, err := s.Store.SeriesByTMDB(r.Context(), req.TMDBID); err == nil && existing.ExpiredAt != nil && !access.CanManage(user, existing.RequestedBy) {
+	if existing, err := s.Store.SeriesByTMDB(r.Context(), req.TMDBID); err == nil && existing.ExpiredAt != nil &&
+		!access.MayRestore(r.Context(), s.Store, user, store.ViewerSeries, existing.ID, existing.RequestedBy) {
 		writeError(w, http.StatusForbidden, "forbidden", "only the request owner or an administrator may restore this item")
 		return
 	}

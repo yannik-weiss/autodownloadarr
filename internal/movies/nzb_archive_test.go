@@ -117,3 +117,23 @@ func TestDownloadArchivesNZBWhenEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadNZB(t *testing.T) {
+	svc := &Services{NZBDir: filepath.Join(t.TempDir(), "nzbs")}
+	rel := store.Release{IndexerID: 1, GUID: "abc", Title: "Film.2024"}
+	if _, _, ok := svc.LoadNZB(rel); ok {
+		t.Fatal("loaded an NZB that was never saved")
+	}
+	raw := []byte("<nzb>saved</nzb>")
+	must(t, svc.SaveNZB(rel, "Film.2024.nzb", raw))
+	other := rel
+	other.GUID = "other"
+	must(t, svc.SaveNZB(other, "Other.nzb", []byte("<nzb>other</nzb>")))
+	data, name, ok := svc.LoadNZB(rel)
+	if !ok || !bytes.Equal(data, raw) || name != "Film.2024" {
+		t.Fatalf("load = %q %q %v", data, name, ok)
+	}
+	if _, _, ok := (&Services{}).LoadNZB(rel); ok {
+		t.Fatal("loaded without an archive directory")
+	}
+}

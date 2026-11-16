@@ -101,6 +101,7 @@ type Episode struct {
 	AvailableAt        *time.Time `json:"availableAt,omitempty"`
 	WatchedAt          *time.Time `json:"watchedAt,omitempty"`
 	DeleteAt           *time.Time `json:"deleteAt,omitempty"`
+	DeleteReason       string     `json:"deleteReason,omitempty"` // see DeleteWatched etc.
 	Base               WatchBase  `json:"-"`
 }
 
@@ -182,6 +183,10 @@ func (s *Store) CreateSeries(ctx context.Context, se Series, requestedBy int64) 
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return Series{}, err
+	}
+	// The requester is the first viewer; the start of the series is theirs.
+	if _, err := s.AddViewer(ctx, Viewer{Kind: ViewerSeries, TitleID: id, UserID: requestedBy}, false); err != nil {
 		return Series{}, err
 	}
 	return s.Series(ctx, id)
@@ -273,14 +278,14 @@ func (s *Store) UpsertEpisodes(ctx context.Context, seriesID int64, eps []Episod
 }
 
 const episodeColumns = `id, series_id, season, episode, title, air_date, runtime, state, attempts, last_error, next_search_at,
-	release_key, release_fingerprint, release_title, file, media_key, progress, started_at, available_at, watched_at, delete_at, base_set, base_views, base_offset, base_account, still_path, season_poster_path`
+	release_key, release_fingerprint, release_title, file, media_key, progress, started_at, available_at, watched_at, delete_at, base_set, base_views, base_offset, base_account, delete_reason, still_path, season_poster_path`
 
 func scanEpisode(row interface{ Scan(...any) error }) (Episode, error) {
 	var e Episode
 	var next, started, avail, watched, del sql.NullInt64
 	err := row.Scan(&e.ID, &e.SeriesID, &e.Season, &e.Episode, &e.Title, &e.AirDate, &e.Runtime, &e.State, &e.Attempts, &e.LastError,
 		&next, &e.ReleaseKey, &e.ReleaseFingerprint, &e.ReleaseTitle, &e.File, &e.MediaKey, &e.Progress, &started, &avail, &watched, &del, &e.Base.Set, &e.Base.Views,
-		&e.Base.Offset, &e.Base.Account, &e.StillPath, &e.SeasonPosterPath)
+		&e.Base.Offset, &e.Base.Account, &e.DeleteReason, &e.StillPath, &e.SeasonPosterPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Episode{}, ErrNotFound
 	}
@@ -330,11 +335,11 @@ func (s *Store) UpdateEpisode(ctx context.Context, e Episode) error {
 	return affected(s.db.ExecContext(ctx, `
 		UPDATE episodes SET state = ?, attempts = ?, last_error = ?, next_search_at = ?, release_key = ?, release_fingerprint = ?, release_title = ?, file = ?, media_key = ?,
 			progress = ?, started_at = ?, available_at = ?, watched_at = ?, delete_at = ?, base_set = ?, base_views = ?, base_offset = ?,
-			base_account = ?, updated_at = ?
+			base_account = ?, delete_reason = ?, updated_at = ?
 		WHERE id = ?`,
 		e.State, e.Attempts, e.LastError, timeArg(e.NextSearchAt), e.ReleaseKey, e.ReleaseFingerprint, e.ReleaseTitle, e.File, e.MediaKey, e.Progress,
 		timeArg(e.StartedAt), timeArg(e.AvailableAt), timeArg(e.WatchedAt), timeArg(e.DeleteAt), e.Base.Set, e.Base.Views,
-		e.Base.Offset, e.Base.Account, s.ms(), e.ID))
+		e.Base.Offset, e.Base.Account, e.DeleteReason, s.ms(), e.ID))
 }
 
 // SetSeriesGenres fills metadata without rewriting concurrently changing settings.

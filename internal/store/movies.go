@@ -27,6 +27,21 @@ const (
 // can be downloaded again.
 func MovieFilesRemoved(state string) bool { return state == MovieDeleted || state == MovieExpired }
 
+// Reasons why the files of a movie or episode were removed.
+const (
+	DeleteWatched = "watched" // watched by its viewers
+	DeleteStarted = "started" // started but not finished in time
+	DeleteExpired = "expired" // not watched in time
+	DeleteMissing = "missing" // the files disappeared outside AutoDownloadarr
+	DeleteUser    = "user"    // removed by a user
+)
+
+// Refetchable reports whether files removed for reason may be downloaded
+// again automatically, e.g. for a viewer who has not seen them yet.
+func Refetchable(reason string) bool {
+	return reason == DeleteWatched || reason == DeleteStarted || reason == DeleteExpired
+}
+
 // Movie is a requested movie.
 type Movie struct {
 	Genres             []string   `json:"genres"`
@@ -57,11 +72,16 @@ type Movie struct {
 	StartedAt          *time.Time `json:"startedAt,omitempty"`
 	WatchedAt          *time.Time `json:"watchedAt,omitempty"`
 	DeleteAt           *time.Time `json:"deleteAt,omitempty"`
-	DeleteNotBefore    *time.Time `json:"-"`        // deadline retained across repeat viewings
-	Progress           float64    `json:"progress"` // 0..1, watched since the file is there
-	Base               WatchBase  `json:"-"`
-	CreatedAt          time.Time  `json:"createdAt"`
-	UpdatedAt          time.Time  `json:"updatedAt"`
+	DeleteNotBefore    *time.Time `json:"-"` // deadline retained across repeat viewings
+	// HoldUntil is how long viewers who are still watching keep the movie.
+	HoldUntil *time.Time `json:"holdUntil,omitempty"`
+	// DeleteReason is why the files were removed: watched, started,
+	// expired, missing or user (see the Delete* constants).
+	DeleteReason string    `json:"deleteReason,omitempty"`
+	Progress     float64   `json:"progress"` // 0..1, watched since the file is there
+	Base         WatchBase `json:"-"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // WatchBase is the watch state the media server reported when the current
@@ -81,16 +101,16 @@ type WatchBase struct {
 const movieColumns = `id, tmdb_id, imdb_id, title, original_title, year, overview, poster_path, runtime, genres, alt_titles,
 	COALESCE(profile_id, 0), COALESCE(requested_by, 0), COALESCE((SELECT username FROM users WHERE id = movies.requested_by), ''),
 	state, keep, attempts, last_error, next_search_at, release_key, release_fingerprint, release_title, folder, media_key,
-	available_at, watched_at, delete_at, started_at, progress, base_set, base_views, base_offset, base_account, delete_not_before, created_at, updated_at`
+	available_at, watched_at, delete_at, started_at, progress, base_set, base_views, base_offset, base_account, delete_not_before, hold_until, delete_reason, created_at, updated_at`
 
 func scanMovie(row interface{ Scan(...any) error }) (Movie, error) {
 	var m Movie
 	var alt, genres string
-	var next, avail, watched, del, started, floor sql.NullInt64
+	var next, avail, watched, del, started, floor, hold sql.NullInt64
 	var created, updated int64
 	err := row.Scan(&m.ID, &m.TMDBID, &m.IMDbID, &m.Title, &m.OriginalTitle, &m.Year, &m.Overview, &m.PosterPath, &m.Runtime, &genres, &alt,
 		&m.ProfileID, &m.RequestedBy, &m.RequestedByName, &m.State, &m.Keep, &m.Attempts, &m.LastError, &next, &m.ReleaseKey, &m.ReleaseFingerprint, &m.ReleaseTitle, &m.Folder, &m.MediaKey,
-		&avail, &watched, &del, &started, &m.Progress, &m.Base.Set, &m.Base.Views, &m.Base.Offset, &m.Base.Account, &floor, &created, &updated)
+		&avail, &watched, &del, &started, &m.Progress, &m.Base.Set, &m.Base.Views, &m.Base.Offset, &m.Base.Account, &floor, &hold, &m.DeleteReason, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Movie{}, ErrNotFound
 	}
@@ -105,6 +125,7 @@ func scanMovie(row interface{ Scan(...any) error }) (Movie, error) {
 	m.NextSearchAt, m.AvailableAt, m.WatchedAt, m.DeleteAt = nullTime(next), nullTime(avail), nullTime(watched), nullTime(del)
 	m.StartedAt = nullTime(started)
 	m.DeleteNotBefore = nullTime(floor)
+	m.HoldUntil = nullTime(hold)
 	m.CreatedAt, m.UpdatedAt = time.UnixMilli(created), time.UnixMilli(updated)
 	return m, nil
 }
@@ -136,6 +157,10 @@ func (s *Store) CreateMovie(ctx context.Context, m Movie, requestedBy int64) (Mo
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return Movie{}, err
+	}
+	// The requester is the first viewer.
+	if _, err := s.AddViewer(ctx, Viewer{Kind: ViewerMovie, TitleID: id, UserID: requestedBy}, false); err != nil {
 		return Movie{}, err
 	}
 	return s.Movie(ctx, id)
@@ -182,11 +207,11 @@ func (s *Store) UpdateMovie(ctx context.Context, m Movie) error {
 	return affected(s.db.ExecContext(ctx, `
 		UPDATE movies SET state = ?, keep = ?, attempts = ?, last_error = ?, next_search_at = ?, release_key = ?, release_fingerprint = ?, release_title = ?,
 			folder = ?, media_key = ?, available_at = ?, watched_at = ?, delete_at = ?, started_at = ?, progress = ?, base_set = ?, base_views = ?,
-			base_offset = ?, base_account = ?, delete_not_before = ?, updated_at = ?
+			base_offset = ?, base_account = ?, delete_not_before = ?, hold_until = ?, delete_reason = ?, updated_at = ?
 		WHERE id = ?`,
 		m.State, m.Keep, m.Attempts, m.LastError, timeArg(m.NextSearchAt), m.ReleaseKey, m.ReleaseFingerprint, m.ReleaseTitle,
 		m.Folder, m.MediaKey, timeArg(m.AvailableAt), timeArg(m.WatchedAt), timeArg(m.DeleteAt), timeArg(m.StartedAt), m.Progress, m.Base.Set,
-		m.Base.Views, m.Base.Offset, m.Base.Account, timeArg(m.DeleteNotBefore), s.ms(), m.ID))
+		m.Base.Views, m.Base.Offset, m.Base.Account, timeArg(m.DeleteNotBefore), timeArg(m.HoldUntil), m.DeleteReason, s.ms(), m.ID))
 }
 
 // DeleteMovie removes a movie and its history.
@@ -321,6 +346,24 @@ func (s *Store) ReleasesOf(ctx context.Context, o Owner) ([]Release, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// PreviousRelease returns the stored release with the identity key (the
+// release an item was last downloaded from) if it can still be used.
+func (s *Store) PreviousRelease(ctx context.Context, o Owner, key string) (Release, bool, error) {
+	if key == "" {
+		return Release{}, false, nil
+	}
+	rels, err := s.ReleasesOf(ctx, o)
+	if err != nil {
+		return Release{}, false, err
+	}
+	for _, r := range rels {
+		if r.Identity() == key && r.Rejected == "" && !r.Blocklisted {
+			return r, true, nil
+		}
+	}
+	return Release{}, false, nil
 }
 
 // Release returns one stored result.

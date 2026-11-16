@@ -371,3 +371,22 @@ export type TrendingTitle = {
   overview: string
   posterUrl?: string
 }
+
+/** A user who watches a movie or series, with their own watch state. */
+export type Viewer = {
+  userId: number
+  userName: string
+  source: 'request' | 'watchlist' | 'trakt' | 'auto'
+  addedAt: string
+  progress: number
+  startedAt?: string
+  watchedAt?: string
+  /** Movies: still watching, so the movie is kept for them. */
+  holding?: boolean
+  /** Series: where the viewer stands (absent when done). */
+  season?: number
+  episode?: number
+  window?: number
+}
+
+export type ViewerList = { viewers: Viewer[]; holdUntil?: string | null }

@@ -164,6 +164,10 @@ func (m *Manager) RequestFromList(ctx context.Context, tmdbID int, userID int64)
 		return store.Series{}, movies.ErrWatchlistExcluded
 	}
 	if se, err := m.store.SeriesByTMDB(ctx, tmdbID); err == nil {
+		// The list owner watches it too (unless they left it).
+		if _, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerSeries, TitleID: se.ID, UserID: userID, Source: store.SourceTrakt}, false); err != nil {
+			return store.Series{}, err
+		}
 		return se, ErrAlreadyRequested
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Series{}, err
@@ -173,6 +177,15 @@ func (m *Manager) RequestFromList(ctx context.Context, tmdbID int, userID int64)
 
 func (m *Manager) request(ctx context.Context, tmdbID int, userID int64, opts RequestOptions) (store.Series, error) {
 	if existing, err := m.store.SeriesByTMDB(ctx, tmdbID); err == nil {
+		// A second request makes the user a viewer with a window of their own.
+		viewer := store.Viewer{Kind: store.ViewerSeries, TitleID: existing.ID, UserID: userID,
+			StartSeason: opts.StartSeason, StartEpisode: opts.StartEpisode}
+		if _, err := m.store.AddViewer(ctx, viewer, true); err != nil {
+			return store.Series{}, err
+		}
+		if err := m.Reconcile(ctx, existing.ID); err != nil {
+			return store.Series{}, err
+		}
 		if existing.ExpiredAt != nil {
 			return m.Restore(ctx, existing.ID)
 		}
@@ -492,6 +505,9 @@ func (m *Manager) notify(n events.Notification) {
 type searchPayload struct {
 	EpisodeID int64 `json:"episodeId"`
 	Round     int   `json:"round"`
+	// Reuse tries the release the episode was downloaded from before
+	// searching again.
+	Reuse bool `json:"reuse,omitempty"`
 }
 
 type idPayload struct {
@@ -506,6 +522,14 @@ func expireKey(id int64) string  { return "series:" + strconv.FormatInt(id, 10) 
 func (m *Manager) scheduleSearch(ctx context.Context, id int64, round int, at time.Time) error {
 	_, err := m.sched.Schedule(ctx, scheduler.Spec{Type: taskSearch, Key: searchKey(id), RunAt: at,
 		Payload: searchPayload{EpisodeID: id, Round: round}})
+	return err
+}
+
+// scheduleReuse fetches an episode again, from its previous release if
+// that is still known, else by a new search.
+func (m *Manager) scheduleReuse(ctx context.Context, id int64) error {
+	_, err := m.sched.Schedule(ctx, scheduler.Spec{Type: taskSearch, Key: searchKey(id),
+		Payload: searchPayload{EpisodeID: id, Reuse: true}})
 	return err
 }
 

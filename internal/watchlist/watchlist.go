@@ -144,15 +144,13 @@ func (m *Manager) pollSource(ctx context.Context, acc *plex.Account, src source)
 		switch it.Type {
 		case "movie":
 			mv, lookupErr := m.store.MovieByTMDB(ctx, id)
-			if lookupErr == nil && mv.WatchedAt != nil {
-				// Only the account whose watch state counted removes it.
-				account, err := m.svc.AccountForUser(ctx, mv.RequestedBy)
-				if err != nil {
+			watched := false
+			if lookupErr == nil {
+				if watched, err = m.watchedBy(ctx, mv, src); err != nil {
 					return err
 				}
-				if account != src.account {
-					continue
-				}
+			}
+			if watched {
 				key := it.Key
 				if it.PlexGUID != "" {
 					key = it.PlexGUID[strings.LastIndex(it.PlexGUID, "/")+1:]
@@ -174,8 +172,37 @@ func (m *Manager) pollSource(ctx context.Context, acc *plex.Account, src source)
 	return nil
 }
 
+// watchedBy reports whether the owner of a watchlist has seen a movie: the
+// viewer's own progress, or for the signed-in account without an assigned
+// user the movie's state when it follows that account.
+func (m *Manager) watchedBy(ctx context.Context, mv store.Movie, src source) (bool, error) {
+	if src.userID > 0 {
+		rows, err := m.store.ItemProgress(ctx, store.ItemMovie, mv.ID)
+		if err != nil {
+			return false, err
+		}
+		if p, ok := rows[mv.ID][src.userID]; ok {
+			return p.WatchedAt != nil, nil
+		}
+		if mv.RequestedBy != src.userID {
+			return false, nil
+		}
+	}
+	if mv.WatchedAt == nil {
+		return false, nil
+	}
+	account, err := m.svc.AccountForUser(ctx, mv.RequestedBy)
+	return account == src.account, err
+}
+
 func (m *Manager) requestMovie(ctx context.Context, tmdbID int, title string, userID int64) {
-	if _, err := m.store.MovieByTMDB(ctx, tmdbID); err == nil || !errors.Is(err, store.ErrNotFound) {
+	if mv, err := m.store.MovieByTMDB(ctx, tmdbID); err == nil {
+		// Already there: the watchlist owner watches it too.
+		if _, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerMovie, TitleID: mv.ID, UserID: userID, Source: store.SourceWatchlist}, false); err != nil {
+			m.log.Warn("add watchlist viewer failed", "movie", mv.Title, "err", err)
+		}
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return
 	}
 	mv, err := m.movies.RequestFromWatchlist(ctx, tmdbID, userID)
@@ -189,7 +216,18 @@ func (m *Manager) requestMovie(ctx context.Context, tmdbID int, title string, us
 }
 
 func (m *Manager) requestSeries(ctx context.Context, tmdbID int, title string, userID int64) {
-	if _, err := m.store.SeriesByTMDB(ctx, tmdbID); err == nil || !errors.Is(err, store.ErrNotFound) {
+	if se, err := m.store.SeriesByTMDB(ctx, tmdbID); err == nil {
+		// Already there: the watchlist owner watches it too, with a window
+		// of their own.
+		active, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerSeries, TitleID: se.ID, UserID: userID, Source: store.SourceWatchlist}, false)
+		if err == nil && active {
+			err = m.series.Reconcile(ctx, se.ID)
+		}
+		if err != nil {
+			m.log.Warn("add watchlist viewer failed", "series", se.Title, "err", err)
+		}
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return
 	}
 	se, err := m.series.Request(ctx, tmdbID, userID, series.RequestOptions{})

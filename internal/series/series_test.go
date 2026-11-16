@@ -3,6 +3,7 @@ package series
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +52,9 @@ type world struct {
 	seasons  int                   // seasons TMDB knows (episodes of later ones air in 2020-02)
 	fetched  []int                 // episodes (or 0 for a pack) in fetch order
 	packOnly bool                  // the indexer offers only a season pack
+	// byToken holds the Plex progress of other accounts (by token).
+	byToken map[string]map[int]float64
+	db      *sql.DB
 }
 
 // addNZB registers raw as the NZB stored under key, where 0 is the season
@@ -180,12 +184,16 @@ func (w *world) handler(t *testing.T, base *string) http.Handler {
 		_, _ = rw.Write(w.nzbs[ep])
 	})
 	mux.HandleFunc("/plex/library/sections/2/refresh", func(http.ResponseWriter, *http.Request) {})
-	mux.HandleFunc("/plex/library/sections/2/all", func(rw http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/plex/library/sections/2/all", func(rw http.ResponseWriter, r *http.Request) {
 		w.mu.Lock()
 		defer w.mu.Unlock()
+		progress := w.progress
+		if pm, ok := w.byToken[r.Header.Get("X-Plex-Token")]; ok {
+			progress = pm
+		}
 		var parts []string
 		for ep := 1; ep <= episodes; ep++ {
-			p := w.progress[ep]
+			p := progress[ep]
 			views, offset, viewed := 0, int(p*2_700_000), int64(0)
 			if p >= 1 {
 				views, offset = 1, 0
@@ -241,6 +249,7 @@ func setup(ctx context.Context, t *testing.T, w *world, tune func(*store.General
 	sqldb, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
 	must(t, err)
 	t.Cleanup(func() { _ = sqldb.Close() })
+	w.db = sqldb
 	box, _ := secrets.New(make([]byte, 32))
 	st := store.New(sqldb, box)
 	root := t.TempDir()
@@ -279,7 +288,7 @@ func setup(ctx context.Context, t *testing.T, w *world, tune func(*store.General
 
 func newWorld(t *testing.T) *world {
 	return &world{usenet: nntptest.New(t), nzbs: map[int][]byte{}, progress: map[int]float64{}, delay: map[int]time.Duration{},
-		old: map[int]bool{}, views: map[int]int{}}
+		old: map[int]bool{}, views: map[int]int{}, byToken: map[string]map[int]float64{}}
 }
 
 func TestRollingWindow(t *testing.T) {

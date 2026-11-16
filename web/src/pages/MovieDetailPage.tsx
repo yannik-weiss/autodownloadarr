@@ -16,6 +16,7 @@ import {
 import type { MovieDetail } from '../api/types'
 import { DownloadProgress, Poster, Problem, ReleaseStatus, StateBadge, WatchProgress } from '../components/MovieBits'
 import { Alert, Badge, Button, Card, SectionTitle, Spinner } from '../components/ui'
+import { Viewers } from '../components/Viewers'
 import { formatBytes, formatDateTime } from '../format'
 import { errorMessage } from '../i18n'
 import { releaseMark, releaseRowTone } from '../releases'
@@ -161,6 +162,8 @@ function Detail({ m }: { m: MovieDetail }) {
           </div>}
         </div>
       </div>
+
+      <Viewers kind="movies" id={m.id} />
 
       <Card className="space-y-3">
         <SectionTitle title={t('movies.releases.title')} description={t('movies.releases.description')} />

@@ -796,5 +796,28 @@
     "syncing": "Synchronisation ist eingeplant oder läuft …",
     "saveFirst": "Änderungen vor der manuellen Synchronisation speichern.",
     "syncNow": "Jetzt synchronisieren"
+  },
+  "viewers": {
+    "title": "Zuschauer",
+    "descriptionMovie": "Alle, die diesen Film schauen. Er bleibt, bis die Zuschauer, die angefangen haben, fertig sind.",
+    "descriptionSeries": "Alle, die diese Serie schauen. Jeder Zuschauer hat sein eigenes Fenster an Episoden; Episoden werden entfernt, wenn alle Zuschauer damit fertig sind, und für Zuschauer, die sie noch nicht gesehen haben, erneut geholt.",
+    "join": "Mitschauen",
+    "leave": "Nicht mehr schauen",
+    "remove": "Entfernen",
+    "none": "Gerade schaut niemand.",
+    "unknownUser": "Unbekannter Benutzer",
+    "held": "Bleibt bis {{date}} für Zuschauer, die noch schauen.",
+    "holding": "Schaut noch",
+    "watched": "Gesehen",
+    "notStarted": "Noch nicht angefangen",
+    "progress": "{{percent}} % gesehen",
+    "position": "Bei {{code}} · {{count}} Episoden bereit oder unterwegs",
+    "done": "Fertig",
+    "sources": {
+      "request": "Anfrage",
+      "watchlist": "Watchlist",
+      "trakt": "Trakt",
+      "auto": "Hat angefangen"
+    }
   }
 }

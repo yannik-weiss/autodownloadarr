@@ -154,7 +154,7 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Request(ctx context.Context, tmdbID int, userID, profileID int64) (store.Movie, error) {
 	m.requestMu.Lock()
 	defer m.requestMu.Unlock()
-	return m.request(ctx, tmdbID, userID, profileID)
+	return m.request(ctx, tmdbID, userID, profileID, store.SourceRequest)
 }
 
 // RequestFromWatchlist honours manual removals without blocking explicit
@@ -169,7 +169,7 @@ func (m *Manager) RequestFromWatchlist(ctx context.Context, tmdbID int, userID i
 	if excluded {
 		return store.Movie{}, ErrWatchlistExcluded
 	}
-	return m.request(ctx, tmdbID, userID, 0)
+	return m.request(ctx, tmdbID, userID, 0, store.SourceWatchlist)
 }
 
 // RequestFromList skips existing requests and honours manual removals for automatic imports.
@@ -184,15 +184,28 @@ func (m *Manager) RequestFromList(ctx context.Context, tmdbID int, userID int64)
 		return store.Movie{}, ErrWatchlistExcluded
 	}
 	if mv, err := m.store.MovieByTMDB(ctx, tmdbID); err == nil {
+		// The list owner watches it too (unless they left it).
+		if _, err := m.store.AddViewer(ctx, store.Viewer{Kind: store.ViewerMovie, TitleID: mv.ID, UserID: userID, Source: store.SourceTrakt}, false); err != nil {
+			return store.Movie{}, err
+		}
 		return mv, ErrAlreadyRequested
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Movie{}, err
 	}
-	return m.request(ctx, tmdbID, userID, 0)
+	return m.request(ctx, tmdbID, userID, 0, store.SourceTrakt)
 }
 
-func (m *Manager) request(ctx context.Context, tmdbID int, userID, profileID int64) (store.Movie, error) {
+// request adds a movie, or joins the user as a viewer of an existing one.
+// An explicit request (source request) rejoins a viewer who left; imports
+// do not.
+func (m *Manager) request(ctx context.Context, tmdbID int, userID, profileID int64, source string) (store.Movie, error) {
 	existing, err := m.store.MovieByTMDB(ctx, tmdbID)
+	if err == nil {
+		viewer := store.Viewer{Kind: store.ViewerMovie, TitleID: existing.ID, UserID: userID, Source: source}
+		if _, err := m.store.AddViewer(ctx, viewer, source == store.SourceRequest); err != nil {
+			return store.Movie{}, err
+		}
+	}
 	switch {
 	case err == nil && !store.MovieFilesRemoved(existing.State):
 		return existing, ErrAlreadyRequested
@@ -204,13 +217,18 @@ func (m *Manager) request(ctx context.Context, tmdbID int, userID, profileID int
 		existing.State = store.MovieSearching
 		existing.Attempts, existing.LastError = 0, ""
 		existing.WatchedAt, existing.DeleteAt, existing.AvailableAt, existing.NextSearchAt = nil, nil, nil, nil
-		existing.StartedAt, existing.DeleteNotBefore = nil, nil
-		existing.MediaKey = ""
+		existing.StartedAt, existing.DeleteNotBefore, existing.HoldUntil = nil, nil, nil
+		existing.MediaKey, existing.DeleteReason = "", ""
+		existing.Progress, existing.Base = 0, store.WatchBase{}
 		if err := m.store.UpdateMovie(ctx, existing); err != nil {
 			return store.Movie{}, err
 		}
+		// Requested again to be watched anew: earlier viewings do not count.
+		if err := m.store.DeleteProgress(ctx, store.ItemMovie, existing.ID); err != nil {
+			return store.Movie{}, err
+		}
 		m.publish(existing)
-		return existing, m.scheduleSearch(ctx, existing.ID, 0, time.Time{})
+		return existing, m.scheduleReuse(ctx, existing.ID)
 	case !errors.Is(err, store.ErrNotFound):
 		return store.Movie{}, err
 	}
@@ -371,7 +389,7 @@ func (m *Manager) Delete(ctx context.Context, id int64, forget bool) error {
 		m.notify(notify.MovieMessage(events.NotifyMovieDeleted, mv, ""))
 		return nil
 	}
-	mv.State = store.MovieDeleted
+	mv.State, mv.DeleteReason = store.MovieDeleted, store.DeleteUser
 	mv.DeleteAt = nil
 	if err := m.store.UpdateMovie(ctx, mv); err != nil {
 		return err
@@ -417,6 +435,9 @@ func (m *Manager) notify(n events.Notification) {
 type searchPayload struct {
 	MovieID int64 `json:"movieId"`
 	Round   int   `json:"round"` // consecutive searches without result
+	// Reuse tries the release the movie was last downloaded from before
+	// searching again.
+	Reuse bool `json:"reuse,omitempty"`
 }
 
 type deletePayload struct {
@@ -431,6 +452,16 @@ func (m *Manager) scheduleSearch(ctx context.Context, id int64, round int, at ti
 	_, err := m.sched.Schedule(ctx, scheduler.Spec{
 		Type: taskSearch, Key: searchKey(id), RunAt: at,
 		Payload: searchPayload{MovieID: id, Round: round},
+	})
+	return err
+}
+
+// scheduleReuse fetches a movie again, from its previous release if that
+// is still known, else by a new search.
+func (m *Manager) scheduleReuse(ctx context.Context, id int64) error {
+	_, err := m.sched.Schedule(ctx, scheduler.Spec{
+		Type: taskSearch, Key: searchKey(id),
+		Payload: searchPayload{MovieID: id, Reuse: true},
 	})
 	return err
 }
@@ -483,6 +514,10 @@ func movieDeletion(mv store.Movie, g store.General) (time.Time, string) {
 	at, reason := movieDeletionPolicy(mv, g)
 	if !at.IsZero() && mv.DeleteNotBefore != nil && mv.DeleteNotBefore.After(at) {
 		at = *mv.DeleteNotBefore
+	}
+	// Other viewers who are still watching keep it a while longer.
+	if !at.IsZero() && mv.HoldUntil != nil && mv.HoldUntil.After(at) {
+		at = *mv.HoldUntil
 	}
 	return at, reason
 }

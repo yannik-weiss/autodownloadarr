@@ -240,10 +240,11 @@ type BotNotice struct {
 
 func (s *Store) BotNotices(ctx context.Context) ([]BotNotice, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT l.provider,l.external_id,l.chat_id,l.language,'movie',m.title || CASE WHEN m.year>0 THEN ' (' || m.year || ')' ELSE '' END,m.state,CAST(COALESCE(m.available_at,0) AS TEXT),m.poster_path,m.id,l.id,CASE WHEN m.state='failed' THEN m.last_error ELSE m.release_title END
- FROM movies m JOIN bot_links l ON l.user_id=m.requested_by WHERE l.notifications=1 AND m.state IN ('available','failed') AND m.updated_at>=l.created_at
+ FROM movies m JOIN viewers v ON v.kind='movie' AND v.title_id=m.id AND v.left_at IS NULL JOIN bot_links l ON l.user_id=v.user_id WHERE l.notifications=1 AND m.state IN ('available','failed') AND m.updated_at>=MAX(l.created_at,v.added_at)
  UNION ALL
  SELECT l.provider,l.external_id,l.chat_id,l.language,'series',se.title || ' · S' || printf('%02d',e.season) || 'E' || printf('%02d',e.episode) || CASE WHEN e.title!='' THEN ' · ' || e.title ELSE '' END,e.state,CAST(COALESCE(e.available_at,0) AS TEXT) || ':' || CAST(e.id AS TEXT),COALESCE(NULLIF(e.still_path,''),NULLIF(e.season_poster_path,''),se.poster_path),se.id,l.id,CASE WHEN e.state='failed' THEN e.last_error ELSE e.release_title END
- FROM episodes e JOIN series se ON se.id=e.series_id JOIN bot_links l ON l.user_id=se.requested_by WHERE l.notifications=1 AND e.state IN ('available','failed') AND e.updated_at>=l.created_at`)
+ FROM episodes e JOIN series se ON se.id=e.series_id JOIN viewers v ON v.kind='series' AND v.title_id=se.id AND v.left_at IS NULL JOIN bot_links l ON l.user_id=v.user_id WHERE l.notifications=1 AND e.state IN ('available','failed') AND e.updated_at>=MAX(l.created_at,v.added_at)
+ AND NOT EXISTS (SELECT 1 FROM viewer_progress p WHERE p.item_kind='episode' AND p.item_id=e.id AND p.user_id=v.user_id AND p.watched_at IS NOT NULL)`)
 	if err != nil {
 		return nil, err
 	}

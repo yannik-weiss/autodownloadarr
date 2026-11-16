@@ -48,3 +48,14 @@ func Check(ctx context.Context, st *store.Store, user auth.User, kind string, id
 	}
 	return nil
 }
+
+// MayRestore reports whether a user may bring back the removed files of a
+// title (kind store.ViewerMovie or store.ViewerSeries): its owner, an
+// administrator or one of its viewers.
+func MayRestore(ctx context.Context, st *store.Store, user auth.User, kind string, id, owner int64) bool {
+	if CanManage(user, owner) {
+		return true
+	}
+	viewer, err := st.IsViewer(ctx, kind, id, user.ID)
+	return err == nil && viewer
+}

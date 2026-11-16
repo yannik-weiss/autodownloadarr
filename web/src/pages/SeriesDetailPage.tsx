@@ -21,6 +21,7 @@ import { releaseMark, releaseTone } from '../releases'
 import { SeasonPicker } from '../components/SeasonPicker'
 import { TriggerFields } from '../components/TriggerFields'
 import { Alert, Badge, Button, Card, Checkbox, Spinner } from '../components/ui'
+import { Viewers } from '../components/Viewers'
 import { formatBytes, formatDateTime } from '../format'
 import { errorMessage } from '../i18n'
 
@@ -53,6 +54,7 @@ function Detail({ s }: { s: SeriesDetail }) {
       <Header s={s} />
       {canManage && <DeleteSeries s={s} />}
       <StatusLine s={s} />
+      <Viewers kind="series" id={s.id} />
       {canManage && <SettingsSection s={s} />}
       {seasons.map((season) => (
         <SeasonSection canManage={canManage} key={season} season={season} episodes={s.episodes.filter((e) => e.season === season)} defaultOpen={season === openSeason} />
