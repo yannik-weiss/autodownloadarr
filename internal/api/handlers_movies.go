@@ -61,9 +61,58 @@ func view(m store.Movie) movieView {
 	return movieView{Movie: m, PosterURL: tmdb.PosterURL(m.PosterPath, "w342")}
 }
 
+// personal shows movies as the signed-in user sees them: for a movie
+// requested by someone else that the user watches too, the user's own
+// progress and whether they have seen it.
+func (s *server) personal(ctx context.Context, list []store.Movie) ([]store.Movie, error) {
+	user, _, _ := currentUser(ctx)
+	mine, err := s.Store.WatchedTitles(ctx, store.ViewerMovie, user.ID)
+	if err != nil || len(mine) == 0 {
+		return list, err
+	}
+	var ids []int64
+	for _, m := range list {
+		if mine[m.ID] && m.RequestedBy != user.ID {
+			ids = append(ids, m.ID)
+		}
+	}
+	rows, err := s.Store.ItemProgress(ctx, store.ItemMovie, ids...)
+	if err != nil {
+		return nil, err
+	}
+	for i, m := range list {
+		if !mine[m.ID] || m.RequestedBy == user.ID {
+			continue
+		}
+		p := rows[m.ID][user.ID]
+		m.Progress, m.StartedAt, m.WatchedAt = p.Progress, p.StartedAt, p.WatchedAt
+		if m.State == store.MovieAvailable || m.State == store.MovieWatched {
+			m.State = store.MovieAvailable
+			if p.WatchedAt != nil {
+				m.State = store.MovieWatched
+			}
+		}
+		list[i] = m
+	}
+	return list, nil
+}
+
+// personalView is view for one movie as the signed-in user sees it.
+func (s *server) personalView(ctx context.Context, m store.Movie) (movieView, error) {
+	list, err := s.personal(ctx, []store.Movie{m})
+	if err != nil {
+		return movieView{}, err
+	}
+	return view(list[0]), nil
+}
+
 func (s *server) handleListMovies(w http.ResponseWriter, r *http.Request) {
 	list, err := s.Store.Movies(r.Context())
 	if err != nil {
+		s.internalError(w, "list movies", err)
+		return
+	}
+	if list, err = s.personal(r.Context(), list); err != nil {
 		s.internalError(w, "list movies", err)
 		return
 	}
@@ -130,7 +179,12 @@ func (s *server) handleGetMovie(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	d := movieDetail{movieView: view(m)}
+	mv, err := s.personalView(r.Context(), m)
+	if err != nil {
+		s.internalError(w, "read movie", err)
+		return
+	}
+	d := movieDetail{movieView: mv}
 	if d.Releases, err = s.Store.Releases(r.Context(), id); err != nil {
 		s.internalError(w, "read releases", err)
 		return

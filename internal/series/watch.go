@@ -195,17 +195,24 @@ func (m *Manager) observeEpisode(ctx context.Context, libs *movies.AccountLibrar
 		m.log.Info("viewer joined by watching", "series", se.Title, "season", e.Season, "episode", e.Episode, "user", d.UserID)
 	}
 
-	// The episode's own fields summarise its viewers.
+	// The episode's own fields summarise its viewers: the furthest progress,
+	// the first start, and watched only once every viewer has seen it.
 	before := *e
 	e.MediaKey, e.Progress, e.StartedAt, e.WatchedAt = mediaKey, 0, nil, nil
+	all := true
+	var last *time.Time
 	for _, u := range append(users, detectedUsers(detected)...) {
-		p, ok := progress[u]
-		if !ok {
-			continue
-		}
+		p := progress[u]
 		e.Progress = max(e.Progress, p.Progress)
 		e.StartedAt = earlier(e.StartedAt, p.StartedAt)
-		e.WatchedAt = earlier(e.WatchedAt, p.WatchedAt)
+		if p.WatchedAt == nil {
+			all = false
+		} else if last == nil || p.WatchedAt.After(*last) {
+			last = p.WatchedAt
+		}
+	}
+	if all {
+		e.WatchedAt = last
 	}
 	switch {
 	case e.WatchedAt != nil:

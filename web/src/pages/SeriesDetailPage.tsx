@@ -15,7 +15,7 @@ import {
   useReportEpisodeRelease,
   useUpdateSeries,
 } from '../api/series'
-import type { DeleteTrigger, Episode, EpisodeState, SeasonInfo, SeriesDetail } from '../api/types'
+import type { DeleteTrigger, Episode, EpisodeState, EpisodeViewer, SeasonInfo, SeriesDetail } from '../api/types'
 import { DownloadProgress, Poster, Problem, ReleaseStatus, StateBadge, WatchProgress } from '../components/MovieBits'
 import { releaseMark, releaseTone } from '../releases'
 import { SeasonPicker } from '../components/SeasonPicker'
@@ -244,6 +244,20 @@ function SeasonSection({ season, episodes, defaultOpen, canManage }: { canManage
   )
 }
 
+/** For whom an episode is there: who still has to watch it and who has. */
+function EpisodeViewers({ viewers }: { viewers: EpisodeViewer[] }) {
+  const { t } = useTranslation()
+  const waiting = viewers
+    .filter((v) => !v.watched)
+    .map((v) => (v.progress > 0 ? `${v.userName} (${Math.round(v.progress * 100)} %)` : v.userName))
+  const watched = viewers.filter((v) => v.watched).map((v) => v.userName)
+  const parts = [
+    waiting.length > 0 && t('series.viewers.readyFor', { names: waiting.join(', ') }),
+    watched.length > 0 && t('series.viewers.watchedBy', { names: watched.join(', ') }),
+  ].filter(Boolean)
+  return <span className="block text-xs text-muted">{parts.join(' · ')}</span>
+}
+
 function EpisodeRow({ e, canManage }: { e: Episode; canManage: boolean }) {
   const { t, i18n } = useTranslation()
   const downloads = useEpisodeDownloads()
@@ -266,6 +280,7 @@ function EpisodeRow({ e, canManage }: { e: Episode; canManage: boolean }) {
             {e.airDate && new Date(e.airDate).toLocaleDateString(lang)}
             {e.deleteAt && <> · {t('movies.deletesAt', { date: formatDateTime(e.deleteAt, lang) })}</>}
           </span>
+          {e.viewers && e.viewers.length > 0 && <EpisodeViewers viewers={e.viewers} />}
           <span className="mt-1 block sm:hidden">
             <StateBadge state={e.state} />
           </span>

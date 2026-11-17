@@ -92,11 +92,70 @@ func refOf(e *store.Episode) *episodeRef {
 	return &episodeRef{ID: e.ID, Season: e.Season, Episode: e.Episode, Progress: e.Progress, AirDate: e.AirDate}
 }
 
-func (s *server) seriesView(r *http.Request, se store.Series) (seriesView, []store.Episode, error) {
-	eps, err := s.Store.Episodes(r.Context(), se.ID)
+// episodeView is an episode as the signed-in user sees it, with how far
+// the other viewers are when several watch the series.
+type episodeView struct {
+	store.Episode
+	Viewers []episodeViewer `json:"viewers,omitempty"`
+}
+
+type episodeViewer struct {
+	UserID   int64   `json:"userId"`
+	UserName string  `json:"userName"`
+	Progress float64 `json:"progress"`
+	Watched  bool    `json:"watched"`
+}
+
+// seriesView builds the series as the signed-in user sees it. A viewer sees
+// their own watch state, position and counts; others see the summary of
+// all viewers.
+func (s *server) seriesView(r *http.Request, se store.Series) (seriesView, []episodeView, error) {
+	ctx := r.Context()
+	eps, err := s.Store.Episodes(ctx, se.ID)
 	if err != nil {
 		return seriesView{}, nil, err
 	}
+	viewers, err := s.Store.ActiveViewers(ctx, store.ViewerSeries, se.ID)
+	if err != nil {
+		return seriesView{}, nil, err
+	}
+	ids := make([]int64, len(eps))
+	for i, e := range eps {
+		ids[i] = e.ID
+	}
+	rows, err := s.Store.ItemProgress(ctx, store.ItemEpisode, ids...)
+	if err != nil {
+		return seriesView{}, nil, err
+	}
+	user, _, _ := currentUser(ctx)
+	mine := false
+	for _, v := range viewers {
+		mine = mine || v.UserID == user.ID
+	}
+
+	out := make([]episodeView, len(eps))
+	for i, e := range eps {
+		present := e.State == store.MovieAvailable || e.State == store.MovieWatched
+		if p, ok := rows[e.ID][user.ID]; mine && (ok || len(rows[e.ID]) > 0) {
+			e.Progress, e.StartedAt, e.WatchedAt = p.Progress, p.StartedAt, p.WatchedAt
+			if present {
+				e.State = store.MovieAvailable
+				if p.WatchedAt != nil {
+					e.State = store.MovieWatched
+				}
+			}
+		}
+		out[i] = episodeView{Episode: e}
+		if present && len(viewers) > 1 {
+			for _, v := range viewers {
+				p := rows[e.ID][v.UserID]
+				out[i].Viewers = append(out[i].Viewers, episodeViewer{UserID: v.UserID, UserName: v.UserName,
+					Progress: p.Progress, Watched: p.WatchedAt != nil})
+			}
+		}
+		eps[i] = e
+	}
+
 	v := seriesView{Series: se, PosterURL: tmdb.PosterURL(se.PosterPath, "w342"), Counts: map[string]int{}}
 	for _, e := range eps {
 		v.Counts[e.State]++
@@ -106,8 +165,27 @@ func (s *server) seriesView(r *http.Request, se store.Series) (seriesView, []sto
 		}
 	}
 	current, upcoming := series.Position(se, eps, time.Now())
+	if mine {
+		// The viewer's own place, which may lie in a gap still to be fetched.
+		positions, err := s.Series.ViewerPositions(ctx, se.ID)
+		if err != nil {
+			return seriesView{}, nil, err
+		}
+		for _, p := range positions {
+			if p.UserID == user.ID {
+				current = nil
+				if p.Current != nil {
+					c := *p.Current
+					if row, ok := rows[c.ID][user.ID]; ok {
+						c.Progress = row.Progress
+					}
+					current = &c
+				}
+			}
+		}
+	}
 	v.Current, v.Upcoming = refOf(current), refOf(upcoming)
-	return v, eps, nil
+	return v, out, nil
 }
 
 func (s *server) handleListSeries(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +242,7 @@ func (s *server) handleRequestSeries(w http.ResponseWriter, r *http.Request) {
 
 type seriesDetail struct {
 	seriesView
-	Episodes []store.Episode `json:"episodes"`
+	Episodes []episodeView `json:"episodes"`
 }
 
 func (s *server) handleGetSeries(w http.ResponseWriter, r *http.Request) {

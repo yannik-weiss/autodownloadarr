@@ -170,6 +170,24 @@ func (s *Store) IsViewer(ctx context.Context, kind string, titleID, userID int64
 	return err == nil, err
 }
 
+// WatchedTitles returns the titles of a kind a user actively watches.
+func (s *Store) WatchedTitles(ctx context.Context, kind string, userID int64) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT title_id FROM viewers WHERE kind = ? AND user_id = ? AND left_at IS NULL`, kind, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // ItemProgress returns the progress of all viewers of the given items:
 // item ID → user ID → progress.
 func (s *Store) ItemProgress(ctx context.Context, itemKind string, itemIDs ...int64) (map[int64]map[int64]Progress, error) {

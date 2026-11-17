@@ -653,6 +653,10 @@
       "In Production": "In production",
       "Planned": "Planned",
       "Pilot": "Pilot"
+    },
+    "viewers": {
+      "readyFor": "For {{names}}",
+      "watchedBy": "watched by {{names}}"
     }
   },
   "warnings": {

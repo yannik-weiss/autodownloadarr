@@ -339,7 +339,11 @@ export type Episode = {
   startedAt?: string
   watchedAt?: string
   deleteAt?: string
+  /** How far each viewer is, when several watch the series. */
+  viewers?: EpisodeViewer[]
 }
+
+export type EpisodeViewer = { userId: number; userName: string; progress: number; watched: boolean }
 
 export type SeriesDetail = Series & { episodes: Episode[] }
 export type EpisodeDetail = Episode & { releases: Release[]; attempts: Attempt[]; blocklist: BlocklistEntry[] }
