@@ -73,7 +73,8 @@ func TestSeriesViewPerViewer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.store.UpsertEpisodes(ctx, se.ID, []store.Episode{{Season: 1, Episode: 1}, {Season: 1, Episode: 2}}); err != nil {
+	if err := e.store.UpsertEpisodes(ctx, se.ID, []store.Episode{{Season: 1, Episode: 1}, {Season: 1, Episode: 2},
+		{Season: 1, Episode: 3}, {Season: 1, Episode: 4}}); err != nil {
 		t.Fatal(err)
 	}
 	eps, err := e.store.Episodes(ctx, se.ID)
@@ -81,18 +82,25 @@ func TestSeriesViewPerViewer(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
+	// Episode 3 is there for the admin only, episode 4 was removed after
+	// the admin saw it; bob's window holds episodes 1 and 2.
 	for i := range eps {
 		eps[i].State, eps[i].AvailableAt = store.MovieAvailable, &now
-		if i == 0 {
+		switch i {
+		case 0:
 			eps[i].State, eps[i].WatchedAt = store.MovieWatched, &now
+		case 3:
+			eps[i].State, eps[i].DeleteReason = store.MovieDeleted, store.DeleteWatched
 		}
 		if err := e.store.UpdateEpisode(ctx, eps[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// The admin (user 1) has seen episode 1; bob joins and has not.
-	if err := e.store.SaveProgress(ctx, store.Progress{ItemKind: store.ItemEpisode, ItemID: eps[0].ID, UserID: 1, Progress: 1, WatchedAt: &now}); err != nil {
-		t.Fatal(err)
+	// The admin (user 1) has seen episodes 1 and 4; bob joins and has not.
+	for _, ep := range []store.Episode{eps[0], eps[3]} {
+		if err := e.store.SaveProgress(ctx, store.Progress{ItemKind: store.ItemEpisode, ItemID: ep.ID, UserID: 1, Progress: 1, WatchedAt: &now}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	bc := e.client(t)
 	if resp, body := e.do(t, bc, "POST", "/api/v1/auth/login", map[string]string{"username": "bob", "password": "longenough"}); resp.StatusCode != http.StatusOK {
@@ -120,9 +128,27 @@ func TestSeriesViewPerViewer(t *testing.T) {
 	if viewers, _ := ep["viewers"].([]any); len(viewers) != 2 {
 		t.Fatalf("episode viewers = %v", ep["viewers"])
 	}
+	states := func(body map[string]any) []any {
+		var out []any
+		list, _ := body["episodes"].([]any)
+		for _, e := range list {
+			out = append(out, e.(map[string]any)["state"])
+		}
+		return out
+	}
+	if got := states(body); got[2] != store.EpisodePending || got[3] != store.EpisodePending {
+		t.Fatalf("bob sees episodes 3 and 4 as %v", got)
+	}
+	ep3 := body["episodes"].([]any)[2].(map[string]any)
+	if viewers, _ := ep3["viewers"].([]any); len(viewers) != 1 {
+		t.Fatalf("episode 3 is listed for %v", ep3["viewers"])
+	}
 	_, body = e.do(t, c, "GET", path, nil)
 	if ep := first(body); ep["state"] != store.MovieWatched {
 		t.Fatalf("the admin sees episode 1 as %v", ep["state"])
+	}
+	if got := states(body); got[2] != store.MovieAvailable || got[3] != store.MovieDeleted {
+		t.Fatalf("the admin sees episodes 3 and 4 as %v", got)
 	}
 }
 

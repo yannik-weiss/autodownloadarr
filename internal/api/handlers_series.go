@@ -132,23 +132,70 @@ func (s *server) seriesView(r *http.Request, se store.Series) (seriesView, []epi
 	for _, v := range viewers {
 		mine = mine || v.UserID == user.ID
 	}
+	// Where each viewer stands and which episodes their window holds.
+	var positions []series.ViewerPosition
+	if mine || len(viewers) > 1 {
+		if positions, err = s.Series.ViewerPositions(ctx, se.ID); err != nil {
+			return seriesView{}, nil, err
+		}
+	}
+	position := func(userID int64) (series.ViewerPosition, bool) {
+		for _, p := range positions {
+			if p.UserID == userID {
+				return p, true
+			}
+		}
+		return series.ViewerPosition{}, false
+	}
+	// waiting reports whether an episode is still to come for a viewer: after
+	// their current episode, beyond their window and not seen by them.
+	waiting := func(userID int64, e store.Episode, p store.Progress) bool {
+		pos, ok := position(userID)
+		if !ok || pos.Current == nil || p.Consumed(0.9) || p.Progress > 0 {
+			return false
+		}
+		if e.Season < pos.Current.Season || e.Season == pos.Current.Season && e.Episode <= pos.Current.Episode {
+			return false
+		}
+		for _, id := range pos.Window {
+			if id == e.ID {
+				return false
+			}
+		}
+		return true
+	}
 
 	out := make([]episodeView, len(eps))
 	for i, e := range eps {
 		present := e.State == store.MovieAvailable || e.State == store.MovieWatched
-		if p, ok := rows[e.ID][user.ID]; mine && (ok || len(rows[e.ID]) > 0) {
-			e.Progress, e.StartedAt, e.WatchedAt = p.Progress, p.StartedAt, p.WatchedAt
-			if present {
+		removed := (e.State == store.MovieDeleted || e.State == store.MovieExpired) && store.Refetchable(e.DeleteReason)
+		if mine {
+			p, ok := rows[e.ID][user.ID]
+			switch {
+			case (present || removed) && waiting(user.ID, e, p):
+				// There for someone else, or removed after another viewer
+				// saw it: for this viewer it is simply not due yet.
+				e.State, e.DeleteAt = store.EpisodePending, nil
+				e.Progress, e.StartedAt, e.WatchedAt = 0, nil, nil
+			case !ok && len(rows[e.ID]) == 0:
+				// No viewer has watch data yet: the summary is accurate.
+			case present:
+				e.Progress, e.StartedAt, e.WatchedAt = p.Progress, p.StartedAt, p.WatchedAt
 				e.State = store.MovieAvailable
 				if p.WatchedAt != nil {
 					e.State = store.MovieWatched
 				}
+			default:
+				e.Progress, e.StartedAt, e.WatchedAt = p.Progress, p.StartedAt, p.WatchedAt
 			}
 		}
 		out[i] = episodeView{Episode: e}
 		if present && len(viewers) > 1 {
 			for _, v := range viewers {
 				p := rows[e.ID][v.UserID]
+				if p.WatchedAt == nil && waiting(v.UserID, e, p) {
+					continue // not for them yet
+				}
 				out[i].Viewers = append(out[i].Viewers, episodeViewer{UserID: v.UserID, UserName: v.UserName,
 					Progress: p.Progress, Watched: p.WatchedAt != nil})
 			}
@@ -165,23 +212,15 @@ func (s *server) seriesView(r *http.Request, se store.Series) (seriesView, []epi
 		}
 	}
 	current, upcoming := series.Position(se, eps, time.Now())
-	if mine {
+	if p, ok := position(user.ID); mine && ok {
 		// The viewer's own place, which may lie in a gap still to be fetched.
-		positions, err := s.Series.ViewerPositions(ctx, se.ID)
-		if err != nil {
-			return seriesView{}, nil, err
-		}
-		for _, p := range positions {
-			if p.UserID == user.ID {
-				current = nil
-				if p.Current != nil {
-					c := *p.Current
-					if row, ok := rows[c.ID][user.ID]; ok {
-						c.Progress = row.Progress
-					}
-					current = &c
-				}
+		current = nil
+		if p.Current != nil {
+			c := *p.Current
+			if row, ok := rows[c.ID][user.ID]; ok {
+				c.Progress = row.Progress
 			}
+			current = &c
 		}
 	}
 	v.Current, v.Upcoming = refOf(current), refOf(upcoming)
