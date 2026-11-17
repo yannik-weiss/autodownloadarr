@@ -116,6 +116,7 @@ func (m *Manager) handleDelete(ctx context.Context, t scheduler.Task) error {
 	case p.Reason == "watched" && mv.State == store.MovieWatched:
 	case p.Reason == "expired" && mv.State == store.MovieAvailable && mv.StartedAt == nil:
 	case p.Reason == "started" && mv.State == store.MovieAvailable && mv.StartedAt != nil:
+	case p.Reason == store.DeleteUnwanted && mv.UnwantedAt != nil:
 	default:
 		return nil // the state changed meanwhile
 	}

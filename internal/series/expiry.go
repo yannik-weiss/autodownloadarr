@@ -14,7 +14,22 @@ import (
 // when the oldest episode still waiting to be watched became available,
 // whichever is later, so a new season does not expire right away.
 func expiryAt(se store.Series, g store.General, eps []store.Episode) time.Time {
-	if se.Keep || se.ExpiredAt != nil || g.UnwatchedExpiryDays <= 0 {
+	if se.Keep || se.ExpiredAt != nil {
+		return time.Time{}
+	}
+	at := unwatchedExpiry(g, eps)
+	// Nobody wants to watch it any more: it expires soon.
+	if se.UnwantedAt != nil {
+		if unwanted := se.UnwantedAt.Add(store.UnwantedGrace); at.IsZero() || unwanted.Before(at) {
+			return unwanted
+		}
+	}
+	return at
+}
+
+// unwatchedExpiry is when a series expires because nobody watched it.
+func unwatchedExpiry(g store.General, eps []store.Episode) time.Time {
+	if g.UnwatchedExpiryDays <= 0 {
 		return time.Time{}
 	}
 	var last, ready time.Time

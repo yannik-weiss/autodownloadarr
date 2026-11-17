@@ -250,7 +250,8 @@ Every title has **viewers**: its requester, users who request it again, whose
 watchlist or Trakt list contains it, who join on the detail page with **Watch
 too**, and assigned profiles that simply start playing it. Viewers can leave;
 administrators can remove them. The quota counts only for the requester, and
-only the owner and administrators manage a title.
+only the owner and administrators manage a title. When the last viewer leaves,
+the title is removed after an hour; joining again brings it back.
 
 - **Movies** count as watched when the requester has seen them. Viewers who
   started but have not finished keep the movie until they do, at most for the

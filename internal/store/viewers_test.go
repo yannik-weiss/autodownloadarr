@@ -131,3 +131,52 @@ func TestPreviousRelease(t *testing.T) {
 		t.Fatal("blocklisted release reused")
 	}
 }
+
+func TestUnwantedWhenLastViewerLeaves(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, id := range []int{1, 2} {
+		botUser(t, s, id)
+	}
+	mv, err := s.CreateMovie(ctx, Movie{TMDBID: 1, Title: "Film", State: MovieAvailable}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddViewer(ctx, Viewer{Kind: ViewerMovie, TitleID: mv.ID, UserID: 2}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LeaveViewer(ctx, ViewerMovie, mv.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := s.Movie(ctx, mv.ID); cur.UnwantedAt != nil {
+		t.Fatal("unwanted while a viewer is left")
+	}
+	if err := s.LeaveViewer(ctx, ViewerMovie, mv.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := s.Movie(ctx, mv.ID); cur.UnwantedAt == nil {
+		t.Fatal("not unwanted after everyone left")
+	}
+	// UpdateMovie leaves it alone; joining again clears it.
+	cur, _ := s.Movie(ctx, mv.ID)
+	if err := s.UpdateMovie(ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddViewer(ctx, Viewer{Kind: ViewerMovie, TitleID: mv.ID, UserID: 2}, true); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ = s.Movie(ctx, mv.ID); cur.UnwantedAt != nil {
+		t.Fatal("still unwanted after a viewer joined")
+	}
+
+	se, err := s.CreateSeries(ctx, Series{TMDBID: 2, Title: "Show"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LeaveViewer(ctx, ViewerSeries, se.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Series(ctx, se.ID); got.UnwantedAt == nil {
+		t.Fatal("series not unwanted after its only viewer left")
+	}
+}

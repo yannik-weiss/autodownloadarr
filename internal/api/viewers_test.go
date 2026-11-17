@@ -195,3 +195,47 @@ func TestMovieViewPerViewer(t *testing.T) {
 		t.Fatalf("the admin sees %v", body["state"])
 	}
 }
+
+// Joining a movie whose files were removed brings it back; only former
+// viewers, its owner and administrators may.
+func TestJoinRestoresRemovedMovie(t *testing.T) {
+	e := newEnv(t)
+	c := e.client(t)
+	e.completeSetup(t, c)
+	ctx := context.Background()
+	for _, name := range []string{"bob", "eve"} {
+		if resp, body := e.do(t, c, "POST", "/api/v1/users", map[string]any{"username": name, "password": "longenough", "role": "user"}); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create user: %d %v", resp.StatusCode, body)
+		}
+	}
+	mv, err := e.store.CreateMovie(ctx, store.Movie{TMDBID: 42, Title: "Film", State: store.MovieAvailable}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func(name string) *http.Client {
+		cl := e.client(t)
+		if resp, body := e.do(t, cl, "POST", "/api/v1/auth/login", map[string]string{"username": name, "password": "longenough"}); resp.StatusCode != http.StatusOK {
+			t.Fatalf("login: %d %v", resp.StatusCode, body)
+		}
+		return cl
+	}
+	bob, eve := login("bob"), login("eve")
+	path := "/api/v1/movies/" + strconv.FormatInt(mv.ID, 10) + "/watch"
+	if resp, _ := e.do(t, bob, "POST", path, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("join: %d", resp.StatusCode)
+	}
+	mv, _ = e.store.Movie(ctx, mv.ID)
+	mv.State, mv.DeleteReason = store.MovieExpired, store.DeleteUnwanted
+	if err := e.store.UpdateMovie(ctx, mv); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do(t, eve, "POST", path, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("stranger restored: %d", resp.StatusCode)
+	}
+	if resp, body := e.do(t, bob, "POST", path, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("restore: %d %v", resp.StatusCode, body)
+	}
+	if cur, _ := e.store.Movie(ctx, mv.ID); cur.State != store.MovieSearching {
+		t.Fatalf("state after joining = %s", cur.State)
+	}
+}

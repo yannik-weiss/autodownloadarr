@@ -164,3 +164,24 @@ func TestViewersHoldMovieDeletion(t *testing.T) {
 		t.Fatal("hold survived the viewer leaving")
 	}
 }
+
+func TestUnwantedMovieIsDeletedSoon(t *testing.T) {
+	g := store.DefaultGeneral()
+	now := time.Now()
+	left := now.Add(-10 * time.Minute)
+	mv := store.Movie{State: store.MovieAvailable, AvailableAt: &now, UnwantedAt: &left}
+	at, reason := movieDeletion(mv, g)
+	if reason != store.DeleteUnwanted || !at.Equal(left.Add(store.UnwantedGrace)) {
+		t.Fatalf("deletion = %v %q", at, reason)
+	}
+	// A hold of viewers does not apply: nobody watches it any more.
+	hold := now.Add(48 * time.Hour)
+	mv.HoldUntil = &hold
+	if at, _ = movieDeletion(mv, g); !at.Equal(left.Add(store.UnwantedGrace)) {
+		t.Fatalf("held until %v", at)
+	}
+	mv.Keep = true
+	if at, _ = movieDeletion(mv, g); !at.IsZero() {
+		t.Fatal("kept movie deleted")
+	}
+}

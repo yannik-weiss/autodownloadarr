@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/shyper/autodownloadarr/internal/access"
+	"github.com/shyper/autodownloadarr/internal/movies"
+	"github.com/shyper/autodownloadarr/internal/series"
 	"github.com/shyper/autodownloadarr/internal/store"
 )
 
@@ -114,11 +117,43 @@ func (s *server) handleJoin(kind string) http.HandlerFunc {
 			return
 		}
 		user, _, _ := currentUser(ctx)
-		v := store.Viewer{Kind: kind, TitleID: id, UserID: user.ID, Source: store.SourceRequest,
-			StartSeason: req.StartSeason, StartEpisode: req.StartEpisode}
-		if _, err := s.Store.AddViewer(ctx, v, true); err != nil {
-			s.internalError(w, "add viewer", err)
+		// Joining a title whose files were removed brings them back, like
+		// requesting it again.
+		var restored bool
+		var err error
+		switch kind {
+		case store.ViewerMovie:
+			mv, _ := s.Store.Movie(ctx, id)
+			if store.MovieFilesRemoved(mv.State) {
+				if !access.MayRestore(ctx, s.Store, user, kind, id, mv.RequestedBy) {
+					writeError(w, http.StatusForbidden, "forbidden", "only the request owner, a viewer or an administrator may restore this item")
+					return
+				}
+				_, err = s.Movies.Request(ctx, mv.TMDBID, user.ID, 0)
+				restored = true
+			}
+		default:
+			se, _ := s.Store.Series(ctx, id)
+			if se.ExpiredAt != nil {
+				if !access.MayRestore(ctx, s.Store, user, kind, id, se.RequestedBy) {
+					writeError(w, http.StatusForbidden, "forbidden", "only the request owner, a viewer or an administrator may restore this item")
+					return
+				}
+				_, err = s.Series.Request(ctx, se.TMDBID, user.ID, series.RequestOptions{StartSeason: req.StartSeason, StartEpisode: req.StartEpisode})
+				restored = true
+			}
+		}
+		if err != nil && !errors.Is(err, movies.ErrAlreadyRequested) && !errors.Is(err, series.ErrAlreadyRequested) {
+			s.writeStoreError(w, "restore "+kind, err)
 			return
+		}
+		if !restored {
+			v := store.Viewer{Kind: kind, TitleID: id, UserID: user.ID, Source: store.SourceRequest,
+				StartSeason: req.StartSeason, StartEpisode: req.StartEpisode}
+			if _, err := s.Store.AddViewer(ctx, v, true); err != nil {
+				s.internalError(w, "add viewer", err)
+				return
+			}
 		}
 		s.viewersChanged(w, r, kind, id)
 	}
@@ -180,6 +215,10 @@ func (s *server) viewersChanged(w http.ResponseWriter, r *http.Request, kind str
 			return
 		}
 		s.handleSeriesViewers(w, r)
+		return
+	}
+	if err := s.Movies.RescheduleDeletion(r.Context(), id); err != nil {
+		s.internalError(w, "reschedule deletion", err)
 		return
 	}
 	s.handleMovieViewers(w, r)

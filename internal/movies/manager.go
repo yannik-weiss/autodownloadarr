@@ -466,6 +466,19 @@ func (m *Manager) scheduleReuse(ctx context.Context, id int64) error {
 	return err
 }
 
+// RescheduleDeletion recalculates when a movie is deleted, e.g. after its
+// viewers changed.
+func (m *Manager) RescheduleDeletion(ctx context.Context, id int64) error {
+	mv, err := m.store.Movie(ctx, id)
+	if err != nil {
+		return err
+	}
+	if mv.State != store.MovieAvailable && mv.State != store.MovieWatched {
+		return nil
+	}
+	return m.scheduleDeletion(ctx, mv)
+}
+
 // scheduleDeletion plans the automatic deletion of an available or
 // watched movie according to the settings.
 func (m *Manager) scheduleDeletion(ctx context.Context, mv store.Movie) error {
@@ -512,6 +525,12 @@ func decode[T any](t scheduler.Task) (T, error) {
 // movieDeletion calculates the deadline from the relevant lifecycle event.
 func movieDeletion(mv store.Movie, g store.General) (time.Time, string) {
 	at, reason := movieDeletionPolicy(mv, g)
+	// Nobody wants to watch it any more: it goes soon, whatever else applies.
+	if !mv.Keep && mv.UnwantedAt != nil && (mv.State == store.MovieAvailable || mv.State == store.MovieWatched) {
+		if unwanted := mv.UnwantedAt.Add(store.UnwantedGrace); at.IsZero() || unwanted.Before(at) {
+			return unwanted, store.DeleteUnwanted
+		}
+	}
 	if !at.IsZero() && mv.DeleteNotBefore != nil && mv.DeleteNotBefore.After(at) {
 		at = *mv.DeleteNotBefore
 	}

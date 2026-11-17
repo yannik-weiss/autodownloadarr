@@ -29,17 +29,18 @@ func MovieFilesRemoved(state string) bool { return state == MovieDeleted || stat
 
 // Reasons why the files of a movie or episode were removed.
 const (
-	DeleteWatched = "watched" // watched by its viewers
-	DeleteStarted = "started" // started but not finished in time
-	DeleteExpired = "expired" // not watched in time
-	DeleteMissing = "missing" // the files disappeared outside AutoDownloadarr
-	DeleteUser    = "user"    // removed by a user
+	DeleteWatched  = "watched"  // watched by its viewers
+	DeleteStarted  = "started"  // started but not finished in time
+	DeleteExpired  = "expired"  // not watched in time
+	DeleteMissing  = "missing"  // the files disappeared outside AutoDownloadarr
+	DeleteUser     = "user"     // removed by a user
+	DeleteUnwanted = "unwanted" // every viewer left it
 )
 
 // Refetchable reports whether files removed for reason may be downloaded
 // again automatically, e.g. for a viewer who has not seen them yet.
 func Refetchable(reason string) bool {
-	return reason == DeleteWatched || reason == DeleteStarted || reason == DeleteExpired
+	return reason == DeleteWatched || reason == DeleteStarted || reason == DeleteExpired || reason == DeleteUnwanted
 }
 
 // Movie is a requested movie.
@@ -75,6 +76,9 @@ type Movie struct {
 	DeleteNotBefore    *time.Time `json:"-"` // deadline retained across repeat viewings
 	// HoldUntil is how long viewers who are still watching keep the movie.
 	HoldUntil *time.Time `json:"holdUntil,omitempty"`
+	// UnwantedAt is when the last viewer left; read-only, kept by the
+	// viewer functions.
+	UnwantedAt *time.Time `json:"unwantedAt,omitempty"`
 	// DeleteReason is why the files were removed: watched, started,
 	// expired, missing or user (see the Delete* constants).
 	DeleteReason string    `json:"deleteReason,omitempty"`
@@ -101,16 +105,16 @@ type WatchBase struct {
 const movieColumns = `id, tmdb_id, imdb_id, title, original_title, year, overview, poster_path, runtime, genres, alt_titles,
 	COALESCE(profile_id, 0), COALESCE(requested_by, 0), COALESCE((SELECT username FROM users WHERE id = movies.requested_by), ''),
 	state, keep, attempts, last_error, next_search_at, release_key, release_fingerprint, release_title, folder, media_key,
-	available_at, watched_at, delete_at, started_at, progress, base_set, base_views, base_offset, base_account, delete_not_before, hold_until, delete_reason, created_at, updated_at`
+	available_at, watched_at, delete_at, started_at, progress, base_set, base_views, base_offset, base_account, delete_not_before, hold_until, delete_reason, unwanted_at, created_at, updated_at`
 
 func scanMovie(row interface{ Scan(...any) error }) (Movie, error) {
 	var m Movie
 	var alt, genres string
-	var next, avail, watched, del, started, floor, hold sql.NullInt64
+	var next, avail, watched, del, started, floor, hold, unwanted sql.NullInt64
 	var created, updated int64
 	err := row.Scan(&m.ID, &m.TMDBID, &m.IMDbID, &m.Title, &m.OriginalTitle, &m.Year, &m.Overview, &m.PosterPath, &m.Runtime, &genres, &alt,
 		&m.ProfileID, &m.RequestedBy, &m.RequestedByName, &m.State, &m.Keep, &m.Attempts, &m.LastError, &next, &m.ReleaseKey, &m.ReleaseFingerprint, &m.ReleaseTitle, &m.Folder, &m.MediaKey,
-		&avail, &watched, &del, &started, &m.Progress, &m.Base.Set, &m.Base.Views, &m.Base.Offset, &m.Base.Account, &floor, &hold, &m.DeleteReason, &created, &updated)
+		&avail, &watched, &del, &started, &m.Progress, &m.Base.Set, &m.Base.Views, &m.Base.Offset, &m.Base.Account, &floor, &hold, &m.DeleteReason, &unwanted, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Movie{}, ErrNotFound
 	}
@@ -126,6 +130,7 @@ func scanMovie(row interface{ Scan(...any) error }) (Movie, error) {
 	m.StartedAt = nullTime(started)
 	m.DeleteNotBefore = nullTime(floor)
 	m.HoldUntil = nullTime(hold)
+	m.UnwantedAt = nullTime(unwanted)
 	m.CreatedAt, m.UpdatedAt = time.UnixMilli(created), time.UnixMilli(updated)
 	return m, nil
 }

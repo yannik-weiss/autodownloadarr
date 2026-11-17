@@ -184,3 +184,17 @@ func TestSkipForViewer(t *testing.T) {
 		}
 	}
 }
+
+func TestUnwantedSeriesExpiresSoon(t *testing.T) {
+	g := store.DefaultGeneral()
+	g.UnwatchedExpiryDays = 0
+	left := time.Now().Add(-time.Minute)
+	se := store.Series{UnwantedAt: &left}
+	if at := expiryAt(se, g, nil); !at.Equal(left.Add(store.UnwantedGrace)) {
+		t.Fatalf("expiry = %v", at)
+	}
+	se.Keep = true
+	if at := expiryAt(se, g, nil); !at.IsZero() {
+		t.Fatal("kept series expires")
+	}
+}

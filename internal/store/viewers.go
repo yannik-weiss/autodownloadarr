@@ -17,6 +17,10 @@ const (
 	ItemEpisode = "episode"
 )
 
+// UnwantedGrace is how long a title stays after its last viewer left, so
+// leaving by mistake can be undone.
+const UnwantedGrace = time.Hour
+
 // Sources of a viewer.
 const (
 	SourceRequest   = "request"
@@ -151,14 +155,34 @@ func (s *Store) AddViewer(ctx context.Context, v Viewer, rejoin bool) (bool, err
 	if err != nil {
 		return false, err
 	}
+	if cur.Active() {
+		// Someone wants it again.
+		if _, err := s.db.ExecContext(ctx, `UPDATE `+titleTable(v.Kind)+` SET unwanted_at = NULL WHERE id = ? AND unwanted_at IS NOT NULL`, v.TitleID); err != nil {
+			return false, err
+		}
+	}
 	return cur.Active(), nil
+}
+
+func titleTable(kind string) string {
+	if kind == ViewerSeries {
+		return "series"
+	}
+	return "movies"
 }
 
 // LeaveViewer marks a viewer as gone. Their progress is kept, so joining
 // again continues where they were.
+// When the last viewer leaves, the title is marked unwanted.
 func (s *Store) LeaveViewer(ctx context.Context, kind string, titleID, userID int64) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE viewers SET left_at = ? WHERE kind = ? AND title_id = ? AND user_id = ? AND left_at IS NULL`,
-		s.ms(), kind, titleID, userID))
+	now := s.ms()
+	if err := affected(s.db.ExecContext(ctx, `UPDATE viewers SET left_at = ? WHERE kind = ? AND title_id = ? AND user_id = ? AND left_at IS NULL`,
+		now, kind, titleID, userID)); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE `+titleTable(kind)+` SET unwanted_at = ? WHERE id = ? AND unwanted_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM viewers WHERE kind = ? AND title_id = ? AND left_at IS NULL)`, now, titleID, kind, titleID)
+	return err
 }
 
 // IsViewer reports whether a user is or was a viewer of a title.
